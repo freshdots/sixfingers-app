@@ -1,0 +1,6 @@
+.DS_Store
+.build/
+/dist/
+/docs/
+!dist/SixFingers.dmg
+packaging/.env

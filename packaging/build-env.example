@@ -1,0 +1,5 @@
+ENABLE_CODESIGN=1
+CODESIGN_IDENTITY="Developer ID Application: Dot Fun Labs (TEAMID1234)"
+ENTITLEMENTS_PATH="<FULL_PATH>/sixfingers/packaging/sixfingers-entitlements.plist"
+DMG_NAME="SixFingers"
+DMG_VOLUME_NAME="SixFingers"

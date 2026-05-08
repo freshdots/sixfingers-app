@@ -1,0 +1,4 @@
+Vendored from Homebrew create-dmg 1.2.3 (github.com/create-dmg/create-dmg).
+We only changed support/template.applescript: the background image is applied after the
+close/open window refresh, with a fresh icon view options handle, so Finder records it in
+the window’s .DS_Store. The create-dmg shell script is otherwise unchanged from that release.
