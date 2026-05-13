@@ -28,8 +28,9 @@ DMG_NAME="${DMG_NAME:-$APP_NAME}"
 VOLUME_NAME="${DMG_VOLUME_NAME:-$APP_NAME}"
 FINAL_DMG_PATH="$DIST_DIR/$DMG_NAME.dmg"
 
-# DMG layout is fixed here (1120×640 art; window size follows PNG via sips below).
-BACKGROUND_SOURCE="$ROOT_DIR/Resources/dmg-background-1x.png"
+# DMG background: Resources/dmg-background-1x.png by default; window size follows PNG via sips below.
+# We can override with DMG_BACKGROUND_SOURCE in packaging/.env (sourced above).
+BACKGROUND_SOURCE="${DMG_BACKGROUND_SOURCE:-$ROOT_DIR/Resources/dmg-background-1x.png}"
 ENABLE_DMG_LAYOUT="1"
 DMG_SYNC_WINDOW_TO_BACKGROUND="1"
 DMG_AUTO_LAYOUT_ICONS="1"
