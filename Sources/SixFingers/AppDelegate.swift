@@ -14,6 +14,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     var appIcon: NSImage?
 
+    /// The unmodified hand glyph for the menu bar status item; we keep it so we can
+    /// rebuild overlay variants (countdown numbers, etc.) and restore the bare icon.
+    private var baseTrayIcon: NSImage?
+
     /// Polls `AXIsProcessTrusted` after we send the user to Accessibility settings; never runs unbounded.
     private var accessibilityTrustTimer: Timer?
     private var accessibilityWaitStarted: Date?
@@ -78,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                     img.isTemplate = true
                     img.size = NSSize(width: 22, height: 22)
                     button.image = img
+                    baseTrayIcon = img
                     loaded = true
                     break
                 }
@@ -108,13 +113,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     func setStatus(_ text: String) {
         DispatchQueue.main.async {
             guard let button = self.statusItem.button else { return }
+
+            // Countdown messages ("Drawing in 3s", "Resuming in 3s") render the digit
+            // over the hand icon so the menu bar footprint stays fixed.
+            if let n = self.countdownDigit(from: text) {
+                button.title = ""
+                button.image = self.makeCountdownIcon(digit: n)
+                return
+            }
+
+            // Any non-countdown status restores the bare hand icon underneath.
+            button.image = self.baseTrayIcon
+
             if text.isEmpty {
                 button.title = ""
-                button.image?.isTemplate = true  // just show icon
             } else {
                 button.title = " \(text)"  // space before text for padding from icon
             }
         }
+    }
+
+    /// Returns the digit from countdown progress strings emitted by the draw engine
+    /// (e.g. "Drawing in 3s", "Resuming in 1s"). Other "Drawing 50%" strings do not match.
+    private func countdownDigit(from text: String) -> Int? {
+        let pattern = #"^(?:Drawing|Resuming) in (\d+)s$"#
+        guard let re = try? NSRegularExpression(pattern: pattern),
+              let match = re.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let range = Range(match.range(at: 1), in: text)
+        else { return nil }
+        return Int(text[range])
+    }
+
+    /// Builds a template-friendly tray icon with the digit knocked out of the hand
+    /// glyph. We punch the number through with `.destinationOut` so the icon adapts
+    /// to dark/light menu bars without us picking a fixed color.
+    private func makeCountdownIcon(digit: Int) -> NSImage {
+        let size = NSSize(width: 22, height: 22)
+        let base = baseTrayIcon
+        let overlay = NSImage(size: size, flipped: false) { rect in
+            base?.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
+
+            let text = "\(digit)" as NSString
+            let font = NSFont.systemFont(ofSize: 13, weight: .heavy)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: NSColor.black,
+            ]
+            let textSize = text.size(withAttributes: attrs)
+            let textRect = NSRect(
+                x: (rect.width - textSize.width) / 2,
+                y: (rect.height - textSize.height) / 2,
+                width: textSize.width,
+                height: textSize.height
+            )
+
+            NSGraphicsContext.current?.compositingOperation = .destinationOut
+            text.draw(in: textRect, withAttributes: attrs)
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
+            return true
+        }
+        overlay.isTemplate = true
+        return overlay
     }
 
     func buildMenu() {
