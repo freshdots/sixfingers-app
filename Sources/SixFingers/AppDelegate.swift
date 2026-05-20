@@ -6,16 +6,94 @@ struct PromptResult {
     let value: String
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
-    var statusItem: NSStatusItem!
-    /// `true` from the moment a draw is requested (covers the thinking + drawing phases)
-    /// until the flow ends. Drives the green-tinted "draw in progress" tray icon.
-    var drawing = false {
-        didSet {
-            guard oldValue != drawing else { return }
-            refreshTrayIcon()
+/// What we composite onto the hand glyph for a given state. The hand is always the
+/// base; an overlay is knocked out of it so the menu bar background shows through.
+enum TrayOverlay: Equatable {
+    case digit(Int)
+    case symbol(String)
+}
+
+/// Single source of truth for everything the user sees in the menu bar: icon tint,
+/// overlay glyph, pulse animation, and the disabled status banner at the top of the
+/// dropdown menu. Replaces the old `setStatus(String)` text path so the menu bar
+/// footprint stays a fixed 22×22 icon at all times.
+enum TrayState: Equatable {
+    case idle
+    case picking
+    case waitingPermission(seconds: Int?)
+    case listening
+    case transcribing
+    case thinking
+    case drawing(progress: Int?)
+    case countdown(Int)
+    case done
+    case failed
+    case cancelled
+
+    /// Human-readable status shown as the (disabled, grayed) first menu item.
+    /// `nil` hides the row entirely — that is how we mark "no status to surface".
+    var menuDescription: String? {
+        switch self {
+        case .idle: return nil
+        case .picking: return "Drag to select drawing area"
+        case .waitingPermission(let seconds):
+            if let seconds, seconds > 0 { return "Waiting for Accessibility (\(seconds)s)" }
+            return "Waiting for Accessibility…"
+        case .listening: return "Listening…"
+        case .transcribing: return "Transcribing…"
+        case .thinking: return "Thinking…"
+        case .drawing(let progress):
+            if let progress { return "Drawing \(progress)%" }
+            return "Drawing…"
+        case .countdown(let n): return "Drawing in \(n)s"
+        case .done: return "Done"
+        case .failed: return "Failed"
+        case .cancelled: return "Cancelled"
         }
     }
+
+    /// States that need the pulsing-alpha animator running.
+    var needsPulse: Bool {
+        switch self {
+        case .listening, .transcribing: return true
+        default: return false
+        }
+    }
+
+    /// Explicit color for states that must survive the menu bar's auto-tinting
+    /// (the active-draw green, the failure red). Nil = template, macOS handles it.
+    var iconTint: NSColor? {
+        switch self {
+        case .thinking, .drawing, .countdown, .done: return .systemGreen
+        case .failed: return .systemRed
+        default: return nil
+        }
+    }
+
+    /// Glyph composited over the hand, knocked out with `.destinationOut`.
+    var iconOverlay: TrayOverlay? {
+        switch self {
+        case .countdown(let n): return .digit(n)
+        case .waitingPermission(let seconds):
+            if let seconds, seconds > 0 { return .digit(seconds) }
+            return nil
+        case .done: return .symbol("checkmark")
+        case .failed, .cancelled: return .symbol("xmark")
+        default: return nil
+        }
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
+    var statusItem: NSStatusItem!
+    /// Re-entry guard for the draw flow. All visible feedback lives on `state`; this
+    /// boolean only gates whether a new draw can begin.
+    var drawing = false
+
+    /// Current tray presentation. Always mutate via `setTrayState` / `flashTrayState`
+    /// so the icon, menu header, and pulse animator stay in sync.
+    private(set) var state: TrayState = .idle
+
     let settingsController = SettingsWindowController()
     var pickerController: AreaPickerController?  // retain picker
 
@@ -24,6 +102,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     /// The unmodified hand glyph for the menu bar status item; we keep it so we can
     /// rebuild overlay variants (countdown numbers, etc.) and restore the bare icon.
     private var baseTrayIcon: NSImage?
+
+    /// The disabled "status banner" at the top of the dropdown menu and its trailing
+    /// separator. Both hide together when `state == .idle`.
+    private weak var statusHeaderItem: NSMenuItem?
+    private weak var statusHeaderSeparator: NSMenuItem?
+
+    /// Drives the pulsing-alpha animation for transient states (listening, transcribing).
+    private var pulseTimer: Timer?
+    private var pulseAlpha: CGFloat = 1.0
+    private var pulseDirection: CGFloat = -1
 
     /// Polls `AXIsProcessTrusted` after we send the user to Accessibility settings; never runs unbounded.
     private var accessibilityTrustTimer: Timer?
@@ -95,7 +183,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 }
             }
             if !loaded {
-                button.title = "🖋"
+                let fallback = NSImage(systemSymbolName: "hand.draw", accessibilityDescription: "SixFingers")
+                fallback?.isTemplate = true
+                button.image = fallback
+                baseTrayIcon = fallback
             }
         }
 
@@ -117,38 +208,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         accessibilityTrustTimer = nil
     }
 
-    // Status updates are strictly icon-based: we never assign `button.title` to a
-    // non-empty string. The menu bar footprint must stay fixed, so every state we
-    // surface — countdown, drawing, idle — flows through `renderTrayIcon`. Text-only
-    // statuses like "Thinking…" / "Listening…" / "Failed" intentionally leave the
-    // bare icon in place; the user gets feedback from dialogs / cursor / drawing
-    // action itself, not from menu bar text.
-    func setStatus(_ text: String) {
-        DispatchQueue.main.async {
-            guard let button = self.statusItem.button else { return }
-            button.title = ""
+    /// Primary mutator for tray presentation. Marshals to the main thread and refreshes
+    /// the icon, the dropdown's status header, and the pulse animator together so they
+    /// can never drift out of sync.
+    func setTrayState(_ next: TrayState) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { self.setTrayState(next) }
+            return
+        }
+        guard state != next else { return }
+        state = next
+        refreshTrayPresentation()
+    }
 
-            if let n = self.countdownDigit(from: text) {
-                button.image = self.renderTrayIcon(digit: n)
-                return
-            }
-
-            button.image = self.renderTrayIcon(digit: nil)
+    /// Sets a transient state (done / failed / cancelled) for `duration` seconds, then
+    /// returns to `.idle` — but only if nothing else has taken over in the meantime.
+    func flashTrayState(_ flash: TrayState, duration: TimeInterval = 2.0) {
+        setTrayState(flash)
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+            guard let self else { return }
+            if self.state == flash { self.setTrayState(.idle) }
         }
     }
 
-    /// Re-renders the tray icon after a state change that does not pass through `setStatus`,
-    /// e.g. when the `drawing` flag flips at the start or end of a draw flow.
-    private func refreshTrayIcon() {
-        DispatchQueue.main.async {
-            guard let button = self.statusItem?.button else { return }
-            button.image = self.renderTrayIcon(digit: nil)
+    private func refreshTrayPresentation() {
+        guard let button = self.statusItem?.button else { return }
+        button.title = ""
+        button.image = self.renderTrayIcon(for: state)
+        let desc = state.menuDescription
+        statusHeaderItem?.title = desc ?? ""
+        statusHeaderItem?.isHidden = (desc == nil)
+        statusHeaderSeparator?.isHidden = (desc == nil)
+        applyPulseForState()
+    }
+
+    private func applyPulseForState() {
+        if state.needsPulse {
+            startPulseIfNeeded()
+        } else {
+            stopPulse()
         }
     }
 
-    /// Returns the digit from countdown progress strings emitted by the draw engine
-    /// (e.g. "Drawing in 3s", "Resuming in 1s"). Other "Drawing 50%" strings do not match.
-    private func countdownDigit(from text: String) -> Int? {
+    private func startPulseIfNeeded() {
+        guard pulseTimer == nil else { return }
+        pulseAlpha = 1.0
+        pulseDirection = -1
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            guard let self, let button = self.statusItem?.button else { return }
+            self.pulseAlpha += self.pulseDirection * 0.04
+            if self.pulseAlpha <= 0.35 { self.pulseAlpha = 0.35; self.pulseDirection = 1 }
+            else if self.pulseAlpha >= 1.0 { self.pulseAlpha = 1.0; self.pulseDirection = -1 }
+            button.alphaValue = self.pulseAlpha
+        }
+        pulseTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopPulse() {
+        pulseTimer?.invalidate()
+        pulseTimer = nil
+        statusItem?.button?.alphaValue = 1.0
+    }
+
+    /// Returns the seconds count from countdown messages the draw engine emits
+    /// (e.g. "Drawing in 3s", "Resuming in 1s"). "Drawing 50%" does not match.
+    private func countdownSeconds(in text: String) -> Int? {
         let pattern = #"^(?:Drawing|Resuming) in (\d+)s$"#
         guard let re = try? NSRegularExpression(pattern: pattern),
               let match = re.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
@@ -157,54 +282,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         return Int(text[range])
     }
 
-    /// Builds the tray icon for the current state. When `drawing` is true we render a
-    /// concrete green silhouette so the menu bar shows a "draw in progress" cue regardless
-    /// of light/dark appearance; when idle we hand back a template hand that macOS tints.
-    /// An optional digit is punched out of the glyph with `.destinationOut` so the number
-    /// reads against whatever lies behind the icon.
-    private func renderTrayIcon(digit: Int?) -> NSImage? {
+    /// Returns the percentage from progress messages (e.g. "Drawing 50%").
+    private func drawProgressPercent(in text: String) -> Int? {
+        guard let match = text.range(of: #"Drawing (\d+)%"#, options: .regularExpression) else { return nil }
+        return Int(text[match].filter { $0.isNumber })
+    }
+
+    /// Composites the hand glyph for `state`: optional color tint + optional knockout overlay
+    /// (digit or SF Symbol). The template flag is flipped off whenever we apply an explicit
+    /// tint so the color survives the menu bar's auto-tinting.
+    private func renderTrayIcon(for state: TrayState) -> NSImage? {
         guard let base = baseTrayIcon else { return nil }
-        let isDrawing = self.drawing
         let size = NSSize(width: 22, height: 22)
-        let overlay = NSImage(size: size, flipped: false) { rect in
-            if isDrawing {
-                NSColor.systemGreen.setFill()
+        let tint = state.iconTint
+        let overlay = state.iconOverlay
+        let image = NSImage(size: size, flipped: false) { rect in
+            if let tint {
+                tint.setFill()
                 rect.fill()
                 base.draw(in: rect, from: .zero, operation: .destinationIn, fraction: 1.0)
             } else {
                 base.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
             }
-
-            if let d = digit {
-                let text = "\(d)" as NSString
-                let font = NSFont.systemFont(ofSize: 13, weight: .heavy)
-                let attrs: [NSAttributedString.Key: Any] = [
-                    .font: font,
-                    .foregroundColor: NSColor.black,
-                ]
-                let textSize = text.size(withAttributes: attrs)
-                let textRect = NSRect(
-                    x: (rect.width - textSize.width) / 2,
-                    y: (rect.height - textSize.height) / 2,
-                    width: textSize.width,
-                    height: textSize.height
-                )
-
-                NSGraphicsContext.current?.compositingOperation = .destinationOut
-                text.draw(in: textRect, withAttributes: attrs)
-                NSGraphicsContext.current?.compositingOperation = .sourceOver
+            if let overlay {
+                self.drawOverlayKnockout(overlay, in: rect)
             }
             return true
         }
-        // Template when idle so macOS picks the right tint; concrete when drawing so the
-        // explicit green survives the menu bar's auto-tinting.
-        overlay.isTemplate = !isDrawing
-        return overlay
+        image.isTemplate = (tint == nil)
+        return image
+    }
+
+    private func drawOverlayKnockout(_ overlay: TrayOverlay, in rect: NSRect) {
+        switch overlay {
+        case .digit(let value):
+            let text = "\(value)" as NSString
+            let font = NSFont.systemFont(ofSize: 13, weight: .heavy)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: NSColor.black,
+            ]
+            let textSize = text.size(withAttributes: attrs)
+            let textRect = NSRect(
+                x: (rect.width - textSize.width) / 2,
+                y: (rect.height - textSize.height) / 2,
+                width: textSize.width,
+                height: textSize.height
+            )
+            NSGraphicsContext.current?.compositingOperation = .destinationOut
+            text.draw(in: textRect, withAttributes: attrs)
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
+        case .symbol(let name):
+            guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return }
+            let inset = rect.insetBy(dx: 5, dy: 5)
+            symbol.draw(in: inset, from: .zero, operation: .destinationOut, fraction: 1.0)
+        }
     }
 
     func buildMenu() {
         let menu = NSMenu()
         let settings = SettingsManager.shared.load()
+
+        // Disabled "status banner" — the only place text describes what the icon means.
+        // Stays hidden while we are idle; reappears whenever `state` carries a description.
+        // No action means NSMenu's auto-validation leaves it grayed without us setting state.
+        let header = NSMenuItem(title: state.menuDescription ?? "", action: nil, keyEquivalent: "")
+        header.isHidden = (state.menuDescription == nil)
+        menu.addItem(header)
+        let headerSeparator = NSMenuItem.separator()
+        headerSeparator.isHidden = (state.menuDescription == nil)
+        menu.addItem(headerSeparator)
+        statusHeaderItem = header
+        statusHeaderSeparator = headerSeparator
 
         // Draw
         let drawItem = NSMenuItem(title: "Draw...", action: #selector(onDraw), keyEquivalent: "")
@@ -427,9 +576,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         let chosen = images.randomElement()!
         let name = URL(fileURLWithPath: chosen).deletingPathExtension().lastPathComponent.replacingOccurrences(of: "_", with: " ")
 
-        setStatus("Drag area to draw \(name)")
+        setTrayState(.picking)
         showPicker { [weak self] area in
-            guard let self, let area else { self?.setStatus(""); return }
+            guard let self, let area else { self?.setTrayState(.idle); return }
             self.drawing = true
             DispatchQueue.global().async { [weak self] in
                 self?.drawImage(imagePath: chosen, prompt: name, area: area)
@@ -438,9 +587,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     func runInpaintFromPrompt(prompt: String) {
-        setStatus("Drag over existing drawing")
+        setTrayState(.picking)
         showPicker { [weak self] area in
-            guard let self, let area else { self?.setStatus(""); return }
+            guard let self, let area else { self?.setTrayState(.idle); return }
             self.runInpaintFlow(prompt: prompt, area: area)
         }
     }
@@ -451,9 +600,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             presentAccessibilityRequiredAlert()
             return
         }
-        setStatus("Drag area to draw in")
+        setTrayState(.picking)
         showPicker { [weak self] area in
-            guard let self, let area else { self?.setStatus(""); return }
+            guard let self, let area else { self?.setTrayState(.idle); return }
             self.drawing = true
             DispatchQueue.global().async { [weak self] in
                 self?.drawImage(imagePath: entry.image, prompt: entry.prompt, area: area)
@@ -472,8 +621,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         s.style = name
         SettingsManager.shared.save(s)
         buildMenu()
-        setStatus(name)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.setStatus("") }
     }
 
     @objc func onAddStyle() {
@@ -557,11 +704,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // Brief dock blip so the click registers — we are still a menu bar app and
+        // route back to .accessory after a moment. The "pen icon in menu bar" status
+        // text that used to live here moved into the dropdown's status header.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        setStatus("SixFingers — pen icon in menu bar")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
-            self?.setStatus("")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             NSApp.setActivationPolicy(.accessory)
         }
         return true
@@ -618,7 +766,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         accessibilityTrustTimer?.invalidate()
         accessibilityWaitStarted = Date()
         lastAccessibilityStatusSecond = -1
-        setStatus("Waiting for permission…")
+        setTrayState(.waitingPermission(seconds: nil))
 
         let timer = Timer(timeInterval: AccessibilityPolling.interval, repeats: true) { [weak self] t in
             guard let self else {
@@ -645,7 +793,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             let sec = Int(elapsed)
             if sec > 0, sec % AccessibilityPolling.statusEverySeconds == 0, sec != self.lastAccessibilityStatusSecond {
                 self.lastAccessibilityStatusSecond = sec
-                self.setStatus("Waiting… \(sec)s (Accessibility)")
+                self.setTrayState(.waitingPermission(seconds: sec))
             }
         }
         accessibilityTrustTimer = timer
@@ -653,15 +801,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     private func handleAccessibilityTrustGranted() {
+        setTrayState(.idle)
         presentAttentionAlertThenRestoreAccessory(
             messageText: "Accessibility enabled",
             informativeText: "SixFingers stays in the menu bar at the top of the screen (near the clock). Look for the pen icon.\n\nRunning open SixFingers.app again focuses us here if the icon is hard to spot."
         ) { [weak self] in
             guard let self else { return }
-            self.setStatus("Accessibility on — menu bar → Draw…")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
-                self?.setStatus("")
-            }
             if SettingsManager.shared.getApiKey() == nil {
                 self.onDraw()
             }
@@ -669,7 +814,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     private func handleAccessibilityTrustWaitTimedOut() {
-        setStatus("")
+        setTrayState(.idle)
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         defer { NSApp.setActivationPolicy(.accessory) }
@@ -694,10 +839,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
             startAccessibilityTrustPolling()
         default:
-            setStatus("Use menu → Draw when Accessibility is on")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
-                self?.setStatus("")
-            }
+            break
         }
     }
 
@@ -715,28 +857,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     @objc func onMicFromDraw() {
         drawWindow?.orderOut(nil)
         drawWindow = nil
-        setStatus("Listening (6s)...")
+        setTrayState(.listening)
         let audioPath = recordAudio(duration: 6)
         if let audioPath = audioPath {
-            setStatus("Transcribing...")
+            setTrayState(.transcribing)
             Task {
                 do {
                     let transcript = try await transcribeAudio(audioPath: audioPath)
                     try? FileManager.default.removeItem(atPath: audioPath)
                     DispatchQueue.main.async { [weak self] in
-                        self?.setStatus("")
+                        self?.setTrayState(.idle)
                         if !transcript.isEmpty { self?.showDrawWithText(transcript) }
                     }
                 } catch {
                     try? FileManager.default.removeItem(atPath: audioPath)
                     DispatchQueue.main.async { [weak self] in
-                        self?.setStatus("Failed")
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self?.setStatus("") }
+                        self?.flashTrayState(.failed, duration: 2)
                     }
                 }
             }
         } else {
-            setStatus("")
+            setTrayState(.idle)
         }
     }
 
@@ -825,9 +966,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     func runDrawFlow(result: PromptResult) {
         if result.type == .file {
-            setStatus("Drag area to draw in")
+            setTrayState(.picking)
             showPicker { [weak self] area in
-                guard let self, let area else { self?.setStatus(""); return }
+                guard let self, let area else { self?.setTrayState(.idle); return }
                 self.drawing = true
                 DispatchQueue.global().async { [weak self] in
                     self?.drawImage(imagePath: result.value, prompt: "your image", area: area)
@@ -837,15 +978,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
 
         let prompt = result.value
-        setStatus("Drag area to draw in")
+        setTrayState(.picking)
         showPicker { [weak self] area in
-            guard let self, let area else { self?.setStatus(""); return }
+            guard let self, let area else { self?.setTrayState(.idle); return }
             let w = abs(area.bottomRight.0 - area.topLeft.0)
             let h = abs(area.bottomRight.1 - area.topLeft.1)
             let aspect = Double(w) / Double(max(1, h))
 
             self.drawing = true
-            self.setStatus("Thinking...")
+            self.setTrayState(.thinking)
 
             let picked = SettingsManager.shared.pickRandomStyle()
 
@@ -859,8 +1000,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                         self?.drawImage(imagePath: imagePath, prompt: prompt, area: area)
                     }
                 } catch {
-                    self.setStatus(String(error.localizedDescription.prefix(25)))
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.setStatus(""); self.drawing = false }
+                    self.presentDrawFailure(error: error)
                 }
             }
         }
@@ -872,7 +1012,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         let aspect = Double(w) / Double(max(1, h))
 
         drawing = true
-        setStatus("Thinking...")
+        setTrayState(.thinking)
 
         let picked = SettingsManager.shared.pickRandomStyle()
         let stylePrompt = picked.prompt + ". Fill the ENTIRE image edge to edge. No empty space, no margins."
@@ -887,9 +1027,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                     self?.drawImage(imagePath: imagePath, prompt: prompt, area: area)
                 }
             } catch {
-                setStatus(String(error.localizedDescription.prefix(25)))
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.setStatus(""); self.drawing = false }
+                presentDrawFailure(error: error)
             }
+        }
+    }
+
+    /// Surfaces a draw-pipeline failure: full message in an alert (truncated text never fit
+    /// in the menu bar anyway) plus a red icon flash for ambient feedback.
+    private func presentDrawFailure(error: Error) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.flashTrayState(.failed, duration: 3)
+            self.drawing = false
+            let alert = NSAlert()
+            alert.messageText = "Drawing failed"
+            alert.informativeText = error.localizedDescription
+            alert.alertStyle = .warning
+            if let icon = self.appIcon { alert.icon = icon }
+            alert.window.level = .floating
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
         }
     }
 
@@ -911,7 +1068,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             presentAccessibilityRequiredAlert()
             DispatchQueue.main.async { [weak self] in
                 self?.drawing = false
-                self?.setStatus("")
+                self?.setTrayState(.idle)
             }
             return
         }
@@ -947,28 +1104,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             try processAndDraw(imagePath: imagePath, topLeft: area.topLeft, bottomRight: area.bottomRight,
                                settings: ds) { [weak self] msg in
                 DispatchQueue.main.async {
-                    if msg.contains("Drawing in") && msg.contains("s") {
-                        if msg.contains("\(ds.countdown)s") { narrator.onStart() }
+                    guard let self else { return }
+                    if let seconds = self.countdownSeconds(in: msg) {
+                        if seconds == ds.countdown { narrator.onStart() }
+                        self.setTrayState(.countdown(seconds))
+                        return
                     }
-                    if let match = msg.range(of: #"Drawing (\d+)%"#, options: .regularExpression) {
-                        let pct = msg[match].filter { $0.isNumber }
-                        self?.setStatus("Drawing \(pct)%")
-                        if let p = Int(pct) {
-                            narrator.onProgress(current: p, total: 100)
-                        }
-                    } else {
-                        self?.setStatus(String(msg.prefix(20)))
+                    if let pct = self.drawProgressPercent(in: msg) {
+                        self.setTrayState(.drawing(progress: pct))
+                        narrator.onProgress(current: pct, total: 100)
+                        return
                     }
+                    // Unknown engine message — hold whatever state we are already showing;
+                    // the menu bar must stay icon-only so we never surface raw text.
                 }
             }
             stopEscapeMonitor()
             onPauseHandler = nil
             narrator.onDone()
             DispatchQueue.main.async { [weak self] in
-                self?.setStatus("Done!")
+                self?.flashTrayState(.done, duration: 4)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
                     _ = narrator // keep alive for audio
-                    self?.setStatus("")
                     self?.drawing = false
                     self?.buildMenu()
                 }
@@ -978,11 +1135,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             onPauseHandler = nil
             narrator.onCancelled()
             DispatchQueue.main.async { [weak self] in
-                self?.setStatus("Cancelled")
+                self?.flashTrayState(.cancelled, duration: 4)
                 // Keep narrator alive long enough for audio to play
                 DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
                     _ = narrator // prevent deallocation
-                    self?.setStatus("")
                     self?.drawing = false
                     self?.buildMenu()
                 }
