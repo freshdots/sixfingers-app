@@ -117,25 +117,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         accessibilityTrustTimer = nil
     }
 
+    // Status updates are strictly icon-based: we never assign `button.title` to a
+    // non-empty string. The menu bar footprint must stay fixed, so every state we
+    // surface — countdown, drawing, idle — flows through `renderTrayIcon`. Text-only
+    // statuses like "Thinking…" / "Listening…" / "Failed" intentionally leave the
+    // bare icon in place; the user gets feedback from dialogs / cursor / drawing
+    // action itself, not from menu bar text.
     func setStatus(_ text: String) {
         DispatchQueue.main.async {
             guard let button = self.statusItem.button else { return }
+            button.title = ""
 
-            // Countdown messages ("Drawing in 3s", "Resuming in 3s") render the digit
-            // over the hand icon so the menu bar footprint stays fixed.
             if let n = self.countdownDigit(from: text) {
-                button.title = ""
                 button.image = self.renderTrayIcon(digit: n)
                 return
             }
 
             button.image = self.renderTrayIcon(digit: nil)
-
-            if text.isEmpty {
-                button.title = ""
-            } else {
-                button.title = " \(text)"  // space before text for padding from icon
-            }
         }
     }
 
