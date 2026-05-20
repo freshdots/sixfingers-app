@@ -8,8 +8,10 @@ struct PromptResult {
 
 /// What we composite onto the hand glyph for a given state. The hand is always the
 /// base; an overlay is knocked out of it so the menu bar background shows through.
+/// `.text` is drawn in Silkscreen at the same size/position regardless of content,
+/// so the cancel "X" lines up with the countdown digits.
 enum TrayOverlay: Equatable {
-    case digit(Int)
+    case text(String)
     case symbol(String)
 }
 
@@ -75,12 +77,13 @@ enum TrayState: Equatable {
     /// Glyph composited over the hand, knocked out with `.destinationOut`.
     var iconOverlay: TrayOverlay? {
         switch self {
-        case .countdown(let n): return .digit(n)
+        case .countdown(let n): return .text("\(n)")
         case .waitingPermission(let seconds):
-            if let seconds, seconds > 0 { return .digit(seconds) }
+            if let seconds, seconds > 0 { return .text("\(seconds)") }
             return nil
         case .done: return .symbol("checkmark")
-        case .failed, .cancelled: return .symbol("xmark")
+        case .failed: return .symbol("xmark")
+        case .cancelled: return .text("X")
         default: return nil
         }
     }
@@ -233,6 +236,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
     }
 
+    /// Safety net so we never freeze on a countdown digit if the engine forgets to
+    /// emit its post-countdown "Drawing..." (or the regex misses a future variant).
+    /// Armed whenever we enter `.countdown(_)`; fires ~1.3s after the last expected
+    /// tick and flips us into `.drawing(progress: nil)` if we're still showing a
+    /// countdown.
+    private var countdownWatchdog: DispatchWorkItem?
+
     /// Primary mutator for tray presentation. Marshals to the main thread and refreshes
     /// the icon, the dropdown's status header, and the pulse animator together so they
     /// can never drift out of sync.
@@ -244,6 +254,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         guard state != next else { return }
         state = next
         refreshTrayPresentation()
+        armCountdownWatchdogIfNeeded(for: next)
+    }
+
+    /// (Re)schedules the stuck-countdown safety net. Each countdown tick resets the
+    /// timer so a 5→4→3→2→1 sequence only ever has one outstanding watchdog. Any
+    /// non-countdown state cancels the watchdog outright.
+    private func armCountdownWatchdogIfNeeded(for next: TrayState) {
+        countdownWatchdog?.cancel()
+        countdownWatchdog = nil
+        guard case .countdown(let n) = next else { return }
+        // Each tick rearms the timer, so we only need cover from this tick: one
+        // second to the next expected tick plus a grace window for the engine to
+        // emit "Drawing..." or its first progress message.
+        let delay = Double(max(n, 1)) + 1.3
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            if case .countdown = self.state {
+                self.setTrayState(.drawing(progress: nil))
+            }
+        }
+        countdownWatchdog = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     /// Sets a transient state (done / failed / cancelled) for `duration` seconds, then
@@ -340,12 +372,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     private func drawOverlayKnockout(_ overlay: TrayOverlay, in rect: NSRect) {
         switch overlay {
-        case .digit(let value):
-            let text = "\(value)" as NSString
+        case .text(let value):
+            let text = value as NSString
             // Silkscreen is a pixel/bitmap font — bundled via registerBundledFonts(). The
             // system-font fallback only fires if registration failed for some reason.
-            let font = NSFont(name: "Silkscreen", size: 14)
-                ?? NSFont.systemFont(ofSize: 13, weight: .heavy)
+            let font = NSFont(name: "Silkscreen", size: 12)
+                ?? NSFont.systemFont(ofSize: 11, weight: .heavy)
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: font,
                 .foregroundColor: NSColor.black,
@@ -353,7 +385,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             let textSize = text.size(withAttributes: attrs)
             let textRect = NSRect(
                 x: (rect.width - textSize.width) / 2,
-                y: (rect.height - textSize.height) / 2,
+                y: (rect.height - textSize.height) / 2 - 3,
                 width: textSize.width,
                 height: textSize.height
             )
@@ -1141,6 +1173,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                     if let pct = self.drawProgressPercent(in: msg) {
                         self.setTrayState(.drawing(progress: pct))
                         narrator.onProgress(current: pct, total: 100)
+                        return
+                    }
+                    // The engine emits "Drawing..." right after the countdown (and again
+                    // after a resume) but before the first progress %. Without this we
+                    // would freeze on `.countdown(1)` until the first 5-polyline tick.
+                    if msg == "Drawing..." {
+                        self.setTrayState(.drawing(progress: nil))
                         return
                     }
                     // Unknown engine message — hold whatever state we are already showing;
