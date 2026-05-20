@@ -8,7 +8,14 @@ struct PromptResult {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     var statusItem: NSStatusItem!
-    var drawing = false
+    /// `true` from the moment a draw is requested (covers the thinking + drawing phases)
+    /// until the flow ends. Drives the green-tinted "draw in progress" tray icon.
+    var drawing = false {
+        didSet {
+            guard oldValue != drawing else { return }
+            refreshTrayIcon()
+        }
+    }
     let settingsController = SettingsWindowController()
     var pickerController: AreaPickerController?  // retain picker
 
@@ -118,18 +125,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             // over the hand icon so the menu bar footprint stays fixed.
             if let n = self.countdownDigit(from: text) {
                 button.title = ""
-                button.image = self.makeCountdownIcon(digit: n)
+                button.image = self.renderTrayIcon(digit: n)
                 return
             }
 
-            // Any non-countdown status restores the bare hand icon underneath.
-            button.image = self.baseTrayIcon
+            button.image = self.renderTrayIcon(digit: nil)
 
             if text.isEmpty {
                 button.title = ""
             } else {
                 button.title = " \(text)"  // space before text for padding from icon
             }
+        }
+    }
+
+    /// Re-renders the tray icon after a state change that does not pass through `setStatus`,
+    /// e.g. when the `drawing` flag flips at the start or end of a draw flow.
+    private func refreshTrayIcon() {
+        DispatchQueue.main.async {
+            guard let button = self.statusItem?.button else { return }
+            button.image = self.renderTrayIcon(digit: nil)
         }
     }
 
@@ -144,35 +159,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         return Int(text[range])
     }
 
-    /// Builds a template-friendly tray icon with the digit knocked out of the hand
-    /// glyph. We punch the number through with `.destinationOut` so the icon adapts
-    /// to dark/light menu bars without us picking a fixed color.
-    private func makeCountdownIcon(digit: Int) -> NSImage {
+    /// Builds the tray icon for the current state. When `drawing` is true we render a
+    /// concrete green silhouette so the menu bar shows a "draw in progress" cue regardless
+    /// of light/dark appearance; when idle we hand back a template hand that macOS tints.
+    /// An optional digit is punched out of the glyph with `.destinationOut` so the number
+    /// reads against whatever lies behind the icon.
+    private func renderTrayIcon(digit: Int?) -> NSImage? {
+        guard let base = baseTrayIcon else { return nil }
+        let isDrawing = self.drawing
         let size = NSSize(width: 22, height: 22)
-        let base = baseTrayIcon
         let overlay = NSImage(size: size, flipped: false) { rect in
-            base?.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
+            if isDrawing {
+                NSColor.systemGreen.setFill()
+                rect.fill()
+                base.draw(in: rect, from: .zero, operation: .destinationIn, fraction: 1.0)
+            } else {
+                base.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
+            }
 
-            let text = "\(digit)" as NSString
-            let font = NSFont.systemFont(ofSize: 13, weight: .heavy)
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: font,
-                .foregroundColor: NSColor.black,
-            ]
-            let textSize = text.size(withAttributes: attrs)
-            let textRect = NSRect(
-                x: (rect.width - textSize.width) / 2,
-                y: (rect.height - textSize.height) / 2,
-                width: textSize.width,
-                height: textSize.height
-            )
+            if let d = digit {
+                let text = "\(d)" as NSString
+                let font = NSFont.systemFont(ofSize: 13, weight: .heavy)
+                let attrs: [NSAttributedString.Key: Any] = [
+                    .font: font,
+                    .foregroundColor: NSColor.black,
+                ]
+                let textSize = text.size(withAttributes: attrs)
+                let textRect = NSRect(
+                    x: (rect.width - textSize.width) / 2,
+                    y: (rect.height - textSize.height) / 2,
+                    width: textSize.width,
+                    height: textSize.height
+                )
 
-            NSGraphicsContext.current?.compositingOperation = .destinationOut
-            text.draw(in: textRect, withAttributes: attrs)
-            NSGraphicsContext.current?.compositingOperation = .sourceOver
+                NSGraphicsContext.current?.compositingOperation = .destinationOut
+                text.draw(in: textRect, withAttributes: attrs)
+                NSGraphicsContext.current?.compositingOperation = .sourceOver
+            }
             return true
         }
-        overlay.isTemplate = true
+        // Template when idle so macOS picks the right tint; concrete when drawing so the
+        // explicit green survives the menu bar's auto-tinting.
+        overlay.isTemplate = !isDrawing
         return overlay
     }
 
