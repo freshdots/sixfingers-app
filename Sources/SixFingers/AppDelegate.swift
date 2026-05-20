@@ -9,10 +9,12 @@ struct PromptResult {
 /// What we composite onto the hand glyph for a given state. The hand is always the
 /// base; an overlay is knocked out of it so the menu bar background shows through.
 /// `.text` is drawn in Silkscreen at the same size/position regardless of content,
-/// so the cancel "X" lines up with the countdown digits.
+/// so the cancel "X" lines up with the countdown digits. `.pixelCheck` is a hand-
+/// rendered checkmark on the same pixel grid as the Silkscreen digits — Silkscreen
+/// itself ships no check glyph, so we draw one that matches the font's aesthetic.
 enum TrayOverlay: Equatable {
     case text(String)
-    case symbol(String)
+    case pixelCheck
 }
 
 /// Single source of truth for everything the user sees in the menu bar: icon tint,
@@ -81,8 +83,8 @@ enum TrayState: Equatable {
         case .waitingPermission(let seconds):
             if let seconds, seconds > 0 { return .text("\(seconds)") }
             return nil
-        case .done: return .symbol("checkmark")
-        case .failed: return .symbol("xmark")
+        case .done: return .pixelCheck
+        case .failed: return .text("X")
         case .cancelled: return .text("X")
         default: return nil
         }
@@ -346,8 +348,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     /// Composites the hand glyph for `state`: optional color tint + optional knockout overlay
-    /// (digit or SF Symbol). The template flag is flipped off whenever we apply an explicit
-    /// tint so the color survives the menu bar's auto-tinting.
+    /// (Silkscreen text or pixel-art check). The template flag is flipped off whenever we apply
+    /// an explicit tint so the color survives the menu bar's auto-tinting.
     private func renderTrayIcon(for state: TrayState) -> NSImage? {
         guard let base = baseTrayIcon else { return nil }
         let size = NSSize(width: 22, height: 22)
@@ -392,11 +394,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             NSGraphicsContext.current?.compositingOperation = .destinationOut
             text.draw(in: textRect, withAttributes: attrs)
             NSGraphicsContext.current?.compositingOperation = .sourceOver
-        case .symbol(let name):
-            guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return }
-            let inset = rect.insetBy(dx: 5, dy: 5)
-            symbol.draw(in: inset, from: .zero, operation: .destinationOut, fraction: 1.0)
+        case .pixelCheck:
+            drawPixelCheckKnockout(in: rect)
         }
+    }
+
+    /// Hand-rendered checkmark on a 2-point pixel grid. Silkscreen has no check glyph,
+    /// so we approximate one in the same blocky style. Grid origin is the icon centre,
+    /// shifted down 3pt to match the Silkscreen digit y-offset.
+    private func drawPixelCheckKnockout(in rect: NSRect) {
+        let pixel: CGFloat = 2
+        // (col, row) pairs forming the check shape on a 7×5 grid. Row 0 is the bottom-left
+        // corner of the glyph; column 0 is its left edge. Two short pixels go down-right
+        // into the elbow, then five pixels climb up-right.
+        let cells: [(Int, Int)] = [
+            (0, 3), (1, 2),
+            (2, 1), (3, 2),
+            (4, 3), (5, 4), (6, 5),
+        ]
+        let glyphCols = 7
+        let glyphRows = 6
+        let glyphWidth = CGFloat(glyphCols) * pixel
+        let glyphHeight = CGFloat(glyphRows) * pixel
+        let originX = (rect.width - glyphWidth) / 2
+        let originY = (rect.height - glyphHeight) / 2 - 3
+        NSGraphicsContext.current?.compositingOperation = .destinationOut
+        NSColor.black.setFill()
+        for (col, row) in cells {
+            let cell = NSRect(
+                x: originX + CGFloat(col) * pixel,
+                y: originY + CGFloat(row) * pixel,
+                width: pixel,
+                height: pixel
+            )
+            cell.fill()
+        }
+        NSGraphicsContext.current?.compositingOperation = .sourceOver
     }
 
     func buildMenu() {
