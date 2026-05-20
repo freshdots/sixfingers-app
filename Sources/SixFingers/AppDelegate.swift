@@ -60,11 +60,13 @@ enum TrayState: Equatable {
         }
     }
 
-    /// Explicit color for states that must survive the menu bar's auto-tinting
-    /// (the active-draw green, the failure red). Nil = template, macOS handles it.
+    /// Explicit color for states that must survive the menu bar's auto-tinting.
+    /// Yellow = "warming up, not drawing yet" (thinking, countdown, permission wait).
+    /// Green = "actively drawing or just finished". Red = failure. Nil = template.
     var iconTint: NSColor? {
         switch self {
-        case .thinking, .drawing, .countdown, .done: return .systemGreen
+        case .thinking, .countdown, .waitingPermission: return .systemYellow
+        case .drawing, .done: return .systemGreen
         case .failed: return .systemRed
         default: return nil
         }
@@ -139,6 +141,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             if let img = NSImage(contentsOfFile: p) { appIcon = img; break }
         }
 
+        registerBundledFonts()
+
         // Set as app icon so all NSAlerts use the rounded version
         if let icon = appIcon { NSApp.applicationIconImage = icon }
 
@@ -206,6 +210,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     func applicationWillTerminate(_ notification: Notification) {
         accessibilityTrustTimer?.invalidate()
         accessibilityTrustTimer = nil
+    }
+
+    /// Registers the bundled Silkscreen TTFs with CoreText so we can address them by
+    /// PostScript name (e.g. `Silkscreen`). Process-scoped, no install prompt, idempotent —
+    /// re-registration after the first call is a no-op the OS handles cleanly.
+    private func registerBundledFonts() {
+        let names = ["Silkscreen-Regular", "Silkscreen-Bold"]
+        let resourcePath = Bundle.main.resourcePath
+        for name in names {
+            let candidates = [
+                resourcePath.map { "\($0)/fonts/\(name).ttf" },
+                resourcePath.map { "\($0)/Resources/fonts/\(name).ttf" },
+                URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
+                    .deletingLastPathComponent()
+                    .appendingPathComponent("../../Resources/fonts/\(name).ttf").path,
+            ].compactMap { $0 }
+            for path in candidates where FileManager.default.fileExists(atPath: path) {
+                CTFontManagerRegisterFontsForURL(URL(fileURLWithPath: path) as CFURL, .process, nil)
+                break
+            }
+        }
     }
 
     /// Primary mutator for tray presentation. Marshals to the main thread and refreshes
@@ -317,7 +342,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         switch overlay {
         case .digit(let value):
             let text = "\(value)" as NSString
-            let font = NSFont.systemFont(ofSize: 13, weight: .heavy)
+            // Silkscreen is a pixel/bitmap font — bundled via registerBundledFonts(). The
+            // system-font fallback only fires if registration failed for some reason.
+            let font = NSFont(name: "Silkscreen", size: 14)
+                ?? NSFont.systemFont(ofSize: 13, weight: .heavy)
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: font,
                 .foregroundColor: NSColor.black,
