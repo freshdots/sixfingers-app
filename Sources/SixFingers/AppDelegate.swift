@@ -535,9 +535,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     func showPermissionDialog() {
         let alert = NSAlert()
-        alert.messageText = "SixFingers needs accessibility access"
-        alert.informativeText =
-            "This lets SixFingers control your mouse to draw.\n\nmacOS enables Accessibility per executable path and code identity. Enable the list row that matches this path:\n\n\(accessibilityExecutablePathForHelp())\n\nIf SixFingers exists in /Applications and also under dist (or elsewhere), Settings can show ON for one path while this run still uses another; expand the list or remove duplicate rows and add only this binary path.\n\nUnsigned or ad-hoc rebuilds change the signature: if it stays stuck, remove SixFingers with −, quit us, reopen from this same path, then enable again; or run: tccutil reset Accessibility com.dotfunlabs.sixfingers\n\nAfter you enable the matching row, we detect it about once per second."
+        alert.messageText = "SixFingers needs Accessibility access"
+        alert.informativeText = "This lets SixFingers draw with your mouse."
         alert.addButton(withTitle: "Open System Settings")
         alert.addButton(withTitle: "Quit")
         if let icon = appIcon { alert.icon = icon }
