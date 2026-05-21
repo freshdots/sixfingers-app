@@ -25,6 +25,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         static let statusEverySeconds = 10
     }
 
+    static let showInDockDefaultsKey = "showInDock"
+    static let welcomeSheetSeenVersionKey = "welcomeSheetSeenForVersion"
+    /// Bump when onboarding copy changes meaningfully so existing users see the new sheet once.
+    static let currentWelcomeSheetVersion = 1
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         #if DEBUG
         let exe = accessibilityExecutablePathForHelp()
@@ -54,8 +59,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         NSApp.mainMenu = NSMenu()
         NSApp.mainMenu?.addItem(editItem)
 
-        // Hide dock icon
-        NSApp.setActivationPolicy(.accessory)
+        // Activation policy: menu-bar-only by default, dock-visible if user opted in.
+        applyDockPreference()
 
         // Create status bar item
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -89,8 +94,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
         buildMenu()
 
-        // First launch: check permissions then open Draw
+        // First launch: introduce the app, then check permissions, then open Draw.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            self.showWelcomeSheetIfNeeded()
             if !checkAccessibilityForDrawing() {
                 // Show permission request dialog that waits
                 self.showPermissionDialog()
@@ -98,6 +104,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 self.onDraw()
             }
         }
+    }
+
+    /// Right-clicking the dock icon (when dock mode is on) should expose the same
+    /// items the menu-bar dropdown does — same instance, no parallel build.
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        return statusItem?.menu
+    }
+
+    /// Sets activation policy from the persisted preference. Called at launch and
+    /// whenever we restore the policy after a temporary `.regular` switch (e.g. for modal alerts).
+    func applyDockPreference() {
+        let showInDock = UserDefaults.standard.bool(forKey: AppDelegate.showInDockDefaultsKey)
+        NSApp.setActivationPolicy(showInDock ? .regular : .accessory)
+    }
+
+    /// Toggle entry point used by Settings. Persists and applies live with no relaunch.
+    func setShowInDock(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: AppDelegate.showInDockDefaultsKey)
+        NSApp.setActivationPolicy(enabled ? .regular : .accessory)
+    }
+
+    /// One-time onboarding sheet. Version-bumped so future copy changes can re-show
+    /// without retroactively forcing it on users who already dismissed an older version.
+    private func showWelcomeSheetIfNeeded() {
+        let seen = UserDefaults.standard.integer(forKey: AppDelegate.welcomeSheetSeenVersionKey)
+        if seen >= AppDelegate.currentWelcomeSheetVersion { return }
+
+        // Surface above other apps; menu-bar-only apps can't activate alerts under `.accessory`.
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        defer { applyDockPreference() }
+
+        let alert = NSAlert()
+        alert.messageText = "Welcome to SixFingers"
+        alert.informativeText = "SixFingers lives in your menu bar. Press ⌥⇧6 anywhere to start a draw. Lost the icon? Enable Dock mode in Settings."
+        alert.addButton(withTitle: "Got it")
+        alert.alertStyle = .informational
+        if let icon = appIcon { alert.icon = icon }
+        alert.window.level = .floating
+        alert.runModal()
+
+        UserDefaults.standard.set(AppDelegate.currentWelcomeSheetVersion, forKey: AppDelegate.welcomeSheetSeenVersionKey)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -456,10 +504,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     /// Menu-bar-only apps ignore `activate` while `.accessory`; we briefly use `.regular` so alerts appear above Settings.
+    /// On restore we honor the user's Show in Dock preference instead of forcing `.accessory`.
     private func presentAttentionAlertThenRestoreAccessory(messageText: String, informativeText: String, completion: @escaping () -> Void) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        defer { NSApp.setActivationPolicy(.accessory) }
+        defer { applyDockPreference() }
         let alert = NSAlert()
         alert.messageText = messageText
         alert.informativeText = informativeText
@@ -477,7 +526,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         setStatus("SixFingers — pen icon in menu bar")
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
             self?.setStatus("")
-            NSApp.setActivationPolicy(.accessory)
+            self?.applyDockPreference()
         }
         return true
     }
@@ -587,7 +636,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         setStatus("")
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        defer { NSApp.setActivationPolicy(.accessory) }
+        defer { applyDockPreference() }
 
         let alert = NSAlert()
         alert.messageText = "Still waiting for Accessibility"

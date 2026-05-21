@@ -29,7 +29,8 @@ class SettingsWindowController: NSObject, NSWindowDelegate {
 
         let allStyleCount = builtInStyles.count + s.customStyles.count
         let styleRows = (allStyleCount + 1) / 2
-        let windowH = 440 + styleRows * 22 + 40  // base + free mode + styles + add button
+        // +28 reserves a row for the "Show in Dock" toggle inserted below the speed/countdown row.
+        let windowH = 440 + styleRows * 22 + 40 + 28
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: windowH),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.level = .floating
@@ -88,6 +89,18 @@ class SettingsWindowController: NSObject, NSWindowDelegate {
         stepper.target = self; stepper.action = #selector(onStepperChange(_:))
         cv.addSubview(stepper)
         self.countdownStepper = stepper
+        y -= 36
+
+        // Show in Dock toggle — live preference, applies immediately without relaunch.
+        let dockCheck = NSButton(checkboxWithTitle: "Show in Dock", target: self, action: #selector(onShowInDockToggle(_:)))
+        dockCheck.state = UserDefaults.standard.bool(forKey: AppDelegate.showInDockDefaultsKey) ? .on : .off
+        dockCheck.frame = NSRect(x: 24, y: y, width: 200, height: 20)
+        cv.addSubview(dockCheck)
+        let dockHint = NSTextField(labelWithString: "Useful if the menu bar icon is hard to find")
+        dockHint.font = .systemFont(ofSize: 11)
+        dockHint.textColor = subtle
+        dockHint.frame = NSRect(x: 24, y: y - 16, width: 372, height: 14)
+        cv.addSubview(dockHint)
         y -= 36
 
         // AI Provider
@@ -304,6 +317,10 @@ class SettingsWindowController: NSObject, NSWindowDelegate {
 
     @objc func onStepperChange(_ sender: NSStepper) {
         countdownLabel?.stringValue = "\(sender.integerValue)"
+    }
+
+    @objc func onShowInDockToggle(_ sender: NSButton) {
+        (NSApp.delegate as? AppDelegate)?.setShowInDock(sender.state == .on)
     }
 
     @objc func onSave() {
