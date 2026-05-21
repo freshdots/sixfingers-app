@@ -1,4 +1,5 @@
 import AppKit
+import HotKey
 
 struct PromptResult {
     enum Kind { case text, file }
@@ -11,6 +12,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     var drawing = false
     let settingsController = SettingsWindowController()
     var pickerController: AreaPickerController?  // retain picker
+
+    /// Carbon-backed global hotkey for `KeyBinding.draw`. Carbon is focus-independent,
+    /// unlike `NSEvent.addGlobalMonitorForEvents`, which drops events on focus changes.
+    private var drawHotKey: HotKey?
 
     var appIcon: NSImage?
 
@@ -88,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
 
         buildMenu()
+        registerDrawHotKey()
 
         // First launch: check permissions then open Draw
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
@@ -103,6 +109,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     func applicationWillTerminate(_ notification: Notification) {
         accessibilityTrustTimer?.invalidate()
         accessibilityTrustTimer = nil
+        drawHotKey = nil
+    }
+
+    private func registerDrawHotKey() {
+        let binding = KeyBinding.draw
+        let hotKey = HotKey(key: binding.key, modifiers: binding.modifiers)
+        hotKey.keyDownHandler = { [weak self] in
+            DispatchQueue.main.async { self?.onDraw() }
+        }
+        drawHotKey = hotKey
     }
 
     func setStatus(_ text: String) {
@@ -121,8 +137,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         let menu = NSMenu()
         let settings = SettingsManager.shared.load()
 
-        // Draw
-        let drawItem = NSMenuItem(title: "Draw...", action: #selector(onDraw), keyEquivalent: "")
+        // Draw — keyEquivalent here is for *display only*; the system-wide trigger
+        // lives in `drawHotKey` so it fires even when the menu is closed.
+        let drawBinding = KeyBinding.draw
+        let drawItem = NSMenuItem(
+            title: "Draw...",
+            action: #selector(onDraw),
+            keyEquivalent: drawBinding.menuKeyEquivalent
+        )
+        drawItem.keyEquivalentModifierMask = drawBinding.modifiers
         drawItem.target = self
         menu.addItem(drawItem)
 
