@@ -25,10 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         static let statusEverySeconds = 10
     }
 
-    static let showInDockDefaultsKey = "showInDock"
     static let welcomeSheetSeenVersionKey = "welcomeSheetSeenForVersion"
     /// Bump when onboarding copy changes meaningfully so existing users see the new sheet once.
-    static let currentWelcomeSheetVersion = 1
+    static let currentWelcomeSheetVersion = 2
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         #if DEBUG
@@ -59,8 +58,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         NSApp.mainMenu = NSMenu()
         NSApp.mainMenu?.addItem(editItem)
 
-        // Activation policy: menu-bar-only by default, dock-visible if user opted in.
-        applyDockPreference()
+        // Always show in the Dock alongside the menu bar icon.
+        NSApp.setActivationPolicy(.regular)
 
         // Create status bar item
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -106,23 +105,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
     }
 
-    /// Right-clicking the dock icon (when dock mode is on) should expose the same
-    /// items the menu-bar dropdown does — same instance, no parallel build.
+    /// Right-clicking the dock icon mirrors the menu-bar dropdown minus the Quit row —
+    /// macOS already appends its own Quit item to dock menus.
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
-        return statusItem?.menu
-    }
-
-    /// Sets activation policy from the persisted preference. Called at launch and
-    /// whenever we restore the policy after a temporary `.regular` switch (e.g. for modal alerts).
-    func applyDockPreference() {
-        let showInDock = UserDefaults.standard.bool(forKey: AppDelegate.showInDockDefaultsKey)
-        NSApp.setActivationPolicy(showInDock ? .regular : .accessory)
-    }
-
-    /// Toggle entry point used by Settings. Persists and applies live with no relaunch.
-    func setShowInDock(_ enabled: Bool) {
-        UserDefaults.standard.set(enabled, forKey: AppDelegate.showInDockDefaultsKey)
-        NSApp.setActivationPolicy(enabled ? .regular : .accessory)
+        let menu = NSMenu()
+        populateMenuItems(into: menu, includeQuit: false)
+        return menu
     }
 
     /// One-time onboarding sheet. Version-bumped so future copy changes can re-show
@@ -131,14 +119,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         let seen = UserDefaults.standard.integer(forKey: AppDelegate.welcomeSheetSeenVersionKey)
         if seen >= AppDelegate.currentWelcomeSheetVersion { return }
 
-        // Surface above other apps; menu-bar-only apps can't activate alerts under `.accessory`.
-        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        defer { applyDockPreference() }
 
         let alert = NSAlert()
         alert.messageText = "Welcome to SixFingers"
-        alert.informativeText = "SixFingers lives in your menu bar. Press ⌥⇧6 anywhere to start a draw. Lost the icon? Enable Dock mode in Settings."
+        alert.informativeText = "SixFingers lives in your menu bar and Dock. Press ⌥⇧6 anywhere to start a draw, or click the Dock icon."
         alert.addButton(withTitle: "Got it")
         alert.alertStyle = .informational
         if let icon = appIcon { alert.icon = icon }
@@ -167,16 +152,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     func buildMenu() {
         let menu = NSMenu()
+        populateMenuItems(into: menu, includeQuit: true)
+        statusItem.menu = menu
+    }
+
+    /// Shared item layout for the menu-bar dropdown and the dock right-click menu.
+    /// The dock menu skips Quit because macOS appends its own.
+    private func populateMenuItems(into menu: NSMenu, includeQuit: Bool) {
         let settings = SettingsManager.shared.load()
 
-        // Draw
         let drawItem = NSMenuItem(title: "Draw...", action: #selector(onDraw), keyEquivalent: "")
         drawItem.target = self
         menu.addItem(drawItem)
 
         menu.addItem(.separator())
 
-        // Recent
         let recents = SettingsManager.shared.loadRecents()
         if !recents.isEmpty {
             let recentMenu = NSMenu()
@@ -197,7 +187,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             menu.addItem(recentItem)
         }
 
-        // Narrator
         let narratorItem = NSMenuItem(title: "Narrator", action: #selector(onToggleNarrator(_:)), keyEquivalent: "")
         narratorItem.target = self
         narratorItem.state = settings.narratorEnabled ? .on : .off
@@ -205,23 +194,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
         menu.addItem(.separator())
 
-        // Settings
         let settingsItem = NSMenuItem(title: "Settings...", action: #selector(onSettings), keyEquivalent: "")
         settingsItem.target = self
         menu.addItem(settingsItem)
 
-        // About
         let aboutItem = NSMenuItem(title: "About", action: #selector(onAbout), keyEquivalent: "")
         aboutItem.target = self
         menu.addItem(aboutItem)
 
-        menu.addItem(.separator())
-
-        let quitItem = NSMenuItem(title: "Quit", action: #selector(onQuit), keyEquivalent: "q")
-        quitItem.target = self
-        menu.addItem(quitItem)
-
-        statusItem.menu = menu
+        if includeQuit {
+            menu.addItem(.separator())
+            let quitItem = NSMenuItem(title: "Quit", action: #selector(onQuit), keyEquivalent: "q")
+            quitItem.target = self
+            menu.addItem(quitItem)
+        }
     }
 
     // MARK: - Actions
@@ -503,12 +489,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         NSApp.terminate(nil)
     }
 
-    /// Menu-bar-only apps ignore `activate` while `.accessory`; we briefly use `.regular` so alerts appear above Settings.
-    /// On restore we honor the user's Show in Dock preference instead of forcing `.accessory`.
-    private func presentAttentionAlertThenRestoreAccessory(messageText: String, informativeText: String, completion: @escaping () -> Void) {
-        NSApp.setActivationPolicy(.regular)
+    private func presentAttentionAlert(messageText: String, informativeText: String, completion: @escaping () -> Void) {
         NSApp.activate(ignoringOtherApps: true)
-        defer { applyDockPreference() }
         let alert = NSAlert()
         alert.messageText = messageText
         alert.informativeText = informativeText
@@ -520,14 +502,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         completion()
     }
 
+    /// Clicking the dock icon (or reopening via Finder/Spotlight) starts a new draw flow.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        setStatus("SixFingers — pen icon in menu bar")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
-            self?.setStatus("")
-            self?.applyDockPreference()
-        }
+        onDraw()
         return true
     }
 
@@ -617,9 +595,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     private func handleAccessibilityTrustGranted() {
-        presentAttentionAlertThenRestoreAccessory(
+        presentAttentionAlert(
             messageText: "Accessibility enabled",
-            informativeText: "SixFingers stays in the menu bar at the top of the screen (near the clock). Look for the pen icon.\n\nRunning open SixFingers.app again focuses us here if the icon is hard to spot."
+            informativeText: "SixFingers stays in your menu bar and Dock. Click the Dock icon or press ⌥⇧6 anywhere to start a draw."
         ) { [weak self] in
             guard let self else { return }
             self.setStatus("Accessibility on — menu bar → Draw…")
@@ -634,14 +612,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     private func handleAccessibilityTrustWaitTimedOut() {
         setStatus("")
-        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        defer { applyDockPreference() }
 
         let alert = NSAlert()
         alert.messageText = "Still waiting for Accessibility"
         alert.informativeText =
-            "macOS has not granted trust to this build after \(Int(AccessibilityPolling.maxWaitSeconds)) seconds.\n\n\(accessibilityExecutablePathForHelp())\n\nCommon cause: Accessibility is ON for /Applications/SixFingers.app but we are running from dist (or the opposite). Those are separate paths; turn ON the row that matches the path above, or remove both SixFingers entries and add only this app.\n\nAd-hoc rebuilds also change the signature: remove SixFingers with −, quit us, reopen from this path, enable again; or run: tccutil reset Accessibility com.dotfunlabs.sixfingers\n\nYou can keep waiting if permissions are still updating.\n\nWe use no Dock icon; after any alert closes, look for the pen icon in the menu bar."
+            "macOS has not granted trust to this build after \(Int(AccessibilityPolling.maxWaitSeconds)) seconds.\n\n\(accessibilityExecutablePathForHelp())\n\nCommon cause: Accessibility is ON for /Applications/SixFingers.app but we are running from dist (or the opposite). Those are separate paths; turn ON the row that matches the path above, or remove both SixFingers entries and add only this app.\n\nAd-hoc rebuilds also change the signature: remove SixFingers with −, quit us, reopen from this path, enable again; or run: tccutil reset Accessibility com.dotfunlabs.sixfingers\n\nYou can keep waiting if permissions are still updating."
         alert.addButton(withTitle: "Continue waiting")
         alert.addButton(withTitle: "Open System Settings")
         alert.addButton(withTitle: "Dismiss")
