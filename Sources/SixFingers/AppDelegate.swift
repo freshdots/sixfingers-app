@@ -106,14 +106,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     func setStatus(_ text: String) {
+        // We keep this function so existing call sites compile, but the menu bar
+        // shows only the pen icon — no text next to it, in any state.
+        _ = text
         DispatchQueue.main.async {
             guard let button = self.statusItem.button else { return }
-            if text.isEmpty {
-                button.title = ""
-                button.image?.isTemplate = true  // just show icon
-            } else {
-                button.title = " \(text)"  // space before text for padding from icon
-            }
+            button.title = ""
+            button.image?.isTemplate = true
         }
     }
 
