@@ -54,7 +54,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
 
         // Register Silkscreen so the tray digit badge can render in our pixel font.
+        // Both weights ship under Resources/fonts/ so installers never need the font preinstalled.
         registerBundledFont(named: "Silkscreen-Regular", ext: "ttf")
+        registerBundledFont(named: "Silkscreen-Bold", ext: "ttf")
 
         // Set as app icon so all NSAlerts use the rounded version
         if let icon = appIcon { NSApp.applicationIconImage = icon }
@@ -163,23 +165,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     /// Locate a font shipped under `Resources/fonts/` and register it with the process so
-    /// `NSFont(name:size:)` can find it. Idempotent — re-registering an already-registered
-    /// URL is a no-op as far as drawing is concerned.
+    /// `NSFont(name:size:)` can find it. We try the packaged-app layout first
+    /// (`Contents/Resources/fonts/…`), then dev-mode locations relative to the running binary
+    /// and cwd so `swift run` from the repo root also picks up the font.
     private func registerBundledFont(named name: String, ext: String) {
+        let exeDir = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
+            .deletingLastPathComponent()
+        // `swift run` produces .build/<triple>/<config>/<bin>; the repo root sits three levels above the bin dir.
+        let repoRootFromExe = exeDir
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+
         let candidates: [String] = [
-            Bundle.main.resourcePath.map { "\($0)/Resources/fonts/\(name).\(ext)" },
+            // Packaged .app: rsync drops Resources/* into Contents/Resources/, so fonts/ sits directly there.
             Bundle.main.resourcePath.map { "\($0)/fonts/\(name).\(ext)" },
-            URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
-                .deletingLastPathComponent()
-                .appendingPathComponent("../../Resources/fonts/\(name).\(ext)").path,
+            Bundle.main.resourcePath.map { "\($0)/Resources/fonts/\(name).\(ext)" },
+            // `swift run` from the repo root.
+            "Resources/fonts/\(name).\(ext)",
+            // `swift run` from anywhere — resolve relative to the binary in .build/<triple>/<config>/.
+            repoRootFromExe.appendingPathComponent("Resources/fonts/\(name).\(ext)").path,
         ].compactMap { $0 }
 
         for path in candidates {
             guard FileManager.default.fileExists(atPath: path) else { continue }
             let url = URL(fileURLWithPath: path) as CFURL
-            CTFontManagerRegisterFontsForURL(url, .process, nil)
+            var cfError: Unmanaged<CFError>?
+            let ok = CTFontManagerRegisterFontsForURL(url, .process, &cfError)
+            if !ok, let err = cfError?.takeRetainedValue() {
+                // Re-registering an already-registered URL reports an error; ignore so a
+                // second `applicationDidFinishLaunching` (tests, fast relaunch) stays silent.
+                let code = CFErrorGetCode(err)
+                if code != CTFontManagerError.alreadyRegistered.rawValue {
+                    fputs("SixFingers: failed to register \(name).\(ext): \(err)\n", stderr)
+                }
+            }
             return
         }
+        fputs("SixFingers: bundled font \(name).\(ext) not found in any known location\n", stderr)
     }
 
     /// What to render on top of the hand icon for a given status string. `nil` means icon-only.
@@ -260,8 +283,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             // Silkscreen is an 8px pixel font — sizes that are multiples of 8 stay crisp;
             // 8pt fits three digits in the tray, 12pt gives readable one/two-digit badges.
             // macOS will recolor the result via the template flag, so any opaque color works.
+            // Prefer the PostScript name so we never silently fall back to a non-pixel system font
+            // if the user happens to have a similarly named family installed.
             let fontSize: CGFloat = digits.count >= 3 ? 8 : 12
-            let font = NSFont(name: "Silkscreen", size: fontSize)
+            let font = NSFont(name: "Silkscreen-Regular", size: fontSize)
+                ?? NSFont(name: "Silkscreen", size: fontSize)
                 ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .heavy)
             let style = NSMutableParagraphStyle()
             style.alignment = .center
