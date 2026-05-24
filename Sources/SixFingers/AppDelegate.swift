@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import HotKey
 
 struct PromptResult {
@@ -51,6 +52,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                    Bundle.main.resourcePath.map { "\($0)/Resources/icon-rounded.png" }].compactMap({ $0 }) {
             if let img = NSImage(contentsOfFile: p) { appIcon = img; break }
         }
+
+        // Register Silkscreen so the tray digit badge can render in our pixel font.
+        registerBundledFont(named: "Silkscreen-Regular", ext: "ttf")
 
         // Set as app icon so all NSAlerts use the rounded version
         if let icon = appIcon { NSApp.applicationIconImage = icon }
@@ -158,6 +162,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         drawHotKey = hotKey
     }
 
+    /// Locate a font shipped under `Resources/fonts/` and register it with the process so
+    /// `NSFont(name:size:)` can find it. Idempotent — re-registering an already-registered
+    /// URL is a no-op as far as drawing is concerned.
+    private func registerBundledFont(named name: String, ext: String) {
+        let candidates: [String] = [
+            Bundle.main.resourcePath.map { "\($0)/Resources/fonts/\(name).\(ext)" },
+            Bundle.main.resourcePath.map { "\($0)/fonts/\(name).\(ext)" },
+            URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
+                .deletingLastPathComponent()
+                .appendingPathComponent("../../Resources/fonts/\(name).\(ext)").path,
+        ].compactMap { $0 }
+
+        for path in candidates {
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            let url = URL(fileURLWithPath: path) as CFURL
+            CTFontManagerRegisterFontsForURL(url, .process, nil)
+            return
+        }
+    }
+
     /// What to render on top of the hand icon for a given status string. `nil` means icon-only.
     private enum TrayBadge {
         case digits(String)        // e.g. "5", "50", "100"  — drawn in pixel-font under the palm
@@ -233,18 +257,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                       operation: .sourceOver,
                       fraction: 0.35)
 
-            // Small bold monospaced digits, centered over the icon — gives a tight, pixel-y badge.
+            // Silkscreen is an 8px pixel font — sizes that are multiples of 8 stay crisp;
+            // 8pt fits three digits in the tray, 12pt gives readable one/two-digit badges.
             // macOS will recolor the result via the template flag, so any opaque color works.
-            let fontSize: CGFloat = digits.count >= 3 ? 9 : 11
-            let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .heavy)
+            let fontSize: CGFloat = digits.count >= 3 ? 8 : 12
+            let font = NSFont(name: "Silkscreen", size: fontSize)
+                ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .heavy)
             let style = NSMutableParagraphStyle()
             style.alignment = .center
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: font,
                 .foregroundColor: NSColor.black,
                 .paragraphStyle: style,
-                .kern: -0.5
             ]
+            // Keep pixel edges crisp — Silkscreen is designed without anti-aliasing.
+            NSGraphicsContext.current?.shouldAntialias = false
             let str = NSAttributedString(string: digits, attributes: attrs)
             let textSize = str.size()
             let rect = NSRect(
@@ -254,6 +281,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 height: textSize.height
             )
             str.draw(in: rect)
+            NSGraphicsContext.current?.shouldAntialias = true
 
         case .symbol(let name):
             // Draw hand icon at full strength, then the SF Symbol on top center.
