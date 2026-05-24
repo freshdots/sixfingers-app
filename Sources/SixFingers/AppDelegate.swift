@@ -28,6 +28,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         static let statusEverySeconds = 10
     }
 
+    static let welcomeSheetSeenVersionKey = "welcomeSheetSeenForVersion"
+    /// Bump when onboarding copy changes meaningfully so existing users see the new sheet once.
+    static let currentWelcomeSheetVersion = 2
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         #if DEBUG
         let exe = accessibilityExecutablePathForHelp()
@@ -57,8 +61,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         NSApp.mainMenu = NSMenu()
         NSApp.mainMenu?.addItem(editItem)
 
-        // Hide dock icon
-        NSApp.setActivationPolicy(.accessory)
+        // Always show in the Dock alongside the menu bar icon.
+        NSApp.setActivationPolicy(.regular)
 
         // Create status bar item
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -93,8 +97,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
         buildMenu()
 
-        // First launch: check permissions then open Draw
+        // First launch: introduce the app, then check permissions, then open Draw.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            self.showWelcomeSheetIfNeeded()
             if !checkAccessibilityForDrawing() {
                 // Show permission request dialog that waits
                 self.showPermissionDialog()
@@ -102,6 +107,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 self.onDraw()
             }
         }
+    }
+
+    /// Right-clicking the dock icon mirrors the menu-bar dropdown minus the Quit row —
+    /// macOS already appends its own Quit item to dock menus.
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let menu = NSMenu()
+        populateMenuItems(into: menu, includeQuit: false)
+        return menu
+    }
+
+    /// One-time onboarding sheet. Version-bumped so future copy changes can re-show
+    /// without retroactively forcing it on users who already dismissed an older version.
+    private func showWelcomeSheetIfNeeded() {
+        let seen = UserDefaults.standard.integer(forKey: AppDelegate.welcomeSheetSeenVersionKey)
+        if seen >= AppDelegate.currentWelcomeSheetVersion { return }
+
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = "Welcome to SixFingers"
+        alert.informativeText = "SixFingers lives in your menu bar and Dock. Press ⌥⇧6 anywhere to start a draw, or click the Dock icon."
+        alert.addButton(withTitle: "Got it")
+        alert.alertStyle = .informational
+        if let icon = appIcon { alert.icon = icon }
+        alert.window.level = .floating
+        alert.runModal()
+
+        UserDefaults.standard.set(AppDelegate.currentWelcomeSheetVersion, forKey: AppDelegate.welcomeSheetSeenVersionKey)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -233,16 +266,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     func buildMenu() {
         let menu = NSMenu()
+        populateMenuItems(into: menu, includeQuit: true)
+        statusItem.menu = menu
+    }
+
+    /// Shared item layout for the menu-bar dropdown and the dock right-click menu.
+    /// The dock menu skips Quit because macOS appends its own.
+    private func populateMenuItems(into menu: NSMenu, includeQuit: Bool) {
         let settings = SettingsManager.shared.load()
 
-        // Draw
         let drawItem = NSMenuItem(title: "Draw...", action: #selector(onDraw), keyEquivalent: "")
         drawItem.target = self
         menu.addItem(drawItem)
 
         menu.addItem(.separator())
 
-        // Recent
         let recents = SettingsManager.shared.loadRecents()
         if !recents.isEmpty {
             let recentMenu = NSMenu()
@@ -263,7 +301,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             menu.addItem(recentItem)
         }
 
-        // Narrator
         let narratorItem = NSMenuItem(title: "Narrator", action: #selector(onToggleNarrator(_:)), keyEquivalent: "")
         narratorItem.target = self
         narratorItem.state = settings.narratorEnabled ? .on : .off
@@ -271,23 +308,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
         menu.addItem(.separator())
 
-        // Settings
         let settingsItem = NSMenuItem(title: "Settings...", action: #selector(onSettings), keyEquivalent: "")
         settingsItem.target = self
         menu.addItem(settingsItem)
 
-        // About
         let aboutItem = NSMenuItem(title: "About", action: #selector(onAbout), keyEquivalent: "")
         aboutItem.target = self
         menu.addItem(aboutItem)
 
-        menu.addItem(.separator())
-
-        let quitItem = NSMenuItem(title: "Quit", action: #selector(onQuit), keyEquivalent: "q")
-        quitItem.target = self
-        menu.addItem(quitItem)
-
-        statusItem.menu = menu
+        if includeQuit {
+            menu.addItem(.separator())
+            let quitItem = NSMenuItem(title: "Quit", action: #selector(onQuit), keyEquivalent: "q")
+            quitItem.target = self
+            menu.addItem(quitItem)
+        }
     }
 
     // MARK: - Actions
@@ -584,14 +618,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         NSApp.terminate(nil)
     }
 
+    /// Clicking the dock icon (or reopening via Finder/Spotlight) starts a new draw flow.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        setStatus("SixFingers — pen icon in menu bar")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
-            self?.setStatus("")
-            NSApp.setActivationPolicy(.accessory)
-        }
+        onDraw()
         return true
     }
 
@@ -687,9 +717,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     private func handleAccessibilityTrustWaitTimedOut() {
         setStatus("")
-        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        defer { NSApp.setActivationPolicy(.accessory) }
 
         let alert = NSAlert()
         alert.messageText = "Still waiting for Accessibility"
