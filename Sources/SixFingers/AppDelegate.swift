@@ -454,22 +454,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         NSApp.terminate(nil)
     }
 
-    /// Menu-bar-only apps ignore `activate` while `.accessory`; we briefly use `.regular` so alerts appear above Settings.
-    private func presentAttentionAlertThenRestoreAccessory(messageText: String, informativeText: String, completion: @escaping () -> Void) {
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
-        defer { NSApp.setActivationPolicy(.accessory) }
-        let alert = NSAlert()
-        alert.messageText = messageText
-        alert.informativeText = informativeText
-        alert.addButton(withTitle: "OK")
-        if let icon = appIcon { alert.icon = icon }
-        alert.alertStyle = .informational
-        alert.window.level = .floating
-        alert.runModal()
-        completion()
-    }
-
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
@@ -565,19 +549,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     private func handleAccessibilityTrustGranted() {
-        presentAttentionAlertThenRestoreAccessory(
-            messageText: "You're all set",
-            informativeText: "Look for the SixFingers pen icon in the menu bar to start drawing."
-        ) { [weak self] in
-            guard let self else { return }
-            self.setStatus("Accessibility on — menu bar → Draw…")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
-                self?.setStatus("")
-            }
-            if SettingsManager.shared.getApiKey() == nil {
-                self.onDraw()
-            }
-        }
+        // Skip the "you're all set" confirmation — jump straight into the draw flow.
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        defer { NSApp.setActivationPolicy(.accessory) }
+        onDraw()
     }
 
     private func handleAccessibilityTrustWaitTimedOut() {
