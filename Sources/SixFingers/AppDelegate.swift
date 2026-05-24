@@ -1,4 +1,6 @@
 import AppKit
+import CoreText
+import HotKey
 
 struct PromptResult {
     enum Kind { case text, file }
@@ -104,6 +106,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     let settingsController = SettingsWindowController()
     var pickerController: AreaPickerController?  // retain picker
 
+    /// Carbon-backed global hotkey for `KeyBinding.draw`. Carbon is focus-independent,
+    /// unlike `NSEvent.addGlobalMonitorForEvents`, which drops events on focus changes.
+    private var drawHotKey: HotKey?
+
     var appIcon: NSImage?
 
     /// The unmodified hand glyph for the menu bar status item; we keep it so we can
@@ -131,6 +137,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         static let statusEverySeconds = 10
     }
 
+    static let welcomeSheetSeenVersionKey = "welcomeSheetSeenForVersion"
+    /// Bump when onboarding copy changes meaningfully so existing users see the new sheet once.
+    static let currentWelcomeSheetVersion = 2
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         #if DEBUG
         let exe = accessibilityExecutablePathForHelp()
@@ -146,7 +156,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             if let img = NSImage(contentsOfFile: p) { appIcon = img; break }
         }
 
-        registerBundledFonts()
+        // Register Silkscreen so the tray digit badge can render in our pixel font.
+        // Both weights ship under Resources/fonts/ so installers never need the font preinstalled.
+        registerBundledFont(named: "Silkscreen-Regular", ext: "ttf")
+        registerBundledFont(named: "Silkscreen-Bold", ext: "ttf")
 
         // Set as app icon so all NSAlerts use the rounded version
         if let icon = appIcon { NSApp.applicationIconImage = icon }
@@ -162,8 +175,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         NSApp.mainMenu = NSMenu()
         NSApp.mainMenu?.addItem(editItem)
 
-        // Hide dock icon
-        NSApp.setActivationPolicy(.accessory)
+        // Always show in the Dock alongside the menu bar icon.
+        NSApp.setActivationPolicy(.regular)
 
         // Create status bar item
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -185,6 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 if let img = NSImage(contentsOfFile: path) {
                     img.isTemplate = true
                     img.size = NSSize(width: 22, height: 22)
+                    baseTrayIcon = img
                     button.image = img
                     baseTrayIcon = img
                     loaded = true
@@ -200,9 +214,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
 
         buildMenu()
+        registerDrawHotKey()
 
-        // First launch: check permissions then open Draw
+        // First launch: introduce the app, then check permissions, then open Draw.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            self.showWelcomeSheetIfNeeded()
             if !checkAccessibilityForDrawing() {
                 // Show permission request dialog that waits
                 self.showPermissionDialog()
@@ -212,30 +228,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
     }
 
+    /// Right-clicking the dock icon mirrors the menu-bar dropdown minus the Quit row —
+    /// macOS already appends its own Quit item to dock menus.
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let menu = NSMenu()
+        populateMenuItems(into: menu, includeQuit: false)
+        return menu
+    }
+
+    /// One-time onboarding sheet. Version-bumped so future copy changes can re-show
+    /// without retroactively forcing it on users who already dismissed an older version.
+    private func showWelcomeSheetIfNeeded() {
+        let seen = UserDefaults.standard.integer(forKey: AppDelegate.welcomeSheetSeenVersionKey)
+        if seen >= AppDelegate.currentWelcomeSheetVersion { return }
+
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = "Welcome to SixFingers"
+        alert.informativeText = "SixFingers lives in your menu bar and Dock. Press ⌥⇧6 anywhere to start a draw, or click the Dock icon."
+        alert.addButton(withTitle: "Got it")
+        alert.alertStyle = .informational
+        if let icon = appIcon { alert.icon = icon }
+        alert.window.level = .floating
+        alert.runModal()
+
+        UserDefaults.standard.set(AppDelegate.currentWelcomeSheetVersion, forKey: AppDelegate.welcomeSheetSeenVersionKey)
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         accessibilityTrustTimer?.invalidate()
         accessibilityTrustTimer = nil
+        drawHotKey = nil
     }
 
-    /// Registers the bundled Silkscreen TTFs with CoreText so we can address them by
-    /// PostScript name (e.g. `Silkscreen`). Process-scoped, no install prompt, idempotent —
-    /// re-registration after the first call is a no-op the OS handles cleanly.
-    private func registerBundledFonts() {
-        let names = ["Silkscreen-Regular", "Silkscreen-Bold"]
-        let resourcePath = Bundle.main.resourcePath
-        for name in names {
-            let candidates = [
-                resourcePath.map { "\($0)/fonts/\(name).ttf" },
-                resourcePath.map { "\($0)/Resources/fonts/\(name).ttf" },
-                URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
-                    .deletingLastPathComponent()
-                    .appendingPathComponent("../../Resources/fonts/\(name).ttf").path,
-            ].compactMap { $0 }
-            for path in candidates where FileManager.default.fileExists(atPath: path) {
-                CTFontManagerRegisterFontsForURL(URL(fileURLWithPath: path) as CFURL, .process, nil)
-                break
-            }
+    private func registerDrawHotKey() {
+        let binding = KeyBinding.draw
+        let hotKey = HotKey(key: binding.key, modifiers: binding.modifiers)
+        hotKey.keyDownHandler = { [weak self] in
+            DispatchQueue.main.async { self?.onDraw() }
         }
+        drawHotKey = hotKey
+    }
+
+    /// Locate a font shipped under `Resources/fonts/` and register it with the process so
+    /// `NSFont(name:size:)` can find it. We try the packaged-app layout first
+    /// (`Contents/Resources/fonts/…`), then dev-mode locations relative to the running binary
+    /// and cwd so `swift run` from the repo root also picks up the font.
+    private func registerBundledFont(named name: String, ext: String) {
+        let exeDir = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
+            .deletingLastPathComponent()
+        // `swift run` produces .build/<triple>/<config>/<bin>; the repo root sits three levels above the bin dir.
+        let repoRootFromExe = exeDir
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+
+        let candidates: [String] = [
+            // Packaged .app: rsync drops Resources/* into Contents/Resources/, so fonts/ sits directly there.
+            Bundle.main.resourcePath.map { "\($0)/fonts/\(name).\(ext)" },
+            Bundle.main.resourcePath.map { "\($0)/Resources/fonts/\(name).\(ext)" },
+            // `swift run` from the repo root.
+            "Resources/fonts/\(name).\(ext)",
+            // `swift run` from anywhere — resolve relative to the binary in .build/<triple>/<config>/.
+            repoRootFromExe.appendingPathComponent("Resources/fonts/\(name).\(ext)").path,
+        ].compactMap { $0 }
+
+        for path in candidates {
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            let url = URL(fileURLWithPath: path) as CFURL
+            var cfError: Unmanaged<CFError>?
+            let ok = CTFontManagerRegisterFontsForURL(url, .process, &cfError)
+            if !ok, let err = cfError?.takeRetainedValue() {
+                // Re-registering an already-registered URL reports an error; ignore so a
+                // second `applicationDidFinishLaunching` (tests, fast relaunch) stays silent.
+                let code = CFErrorGetCode(err)
+                if code != CTFontManagerError.alreadyRegistered.rawValue {
+                    fputs("SixFingers: failed to register \(name).\(ext): \(err)\n", stderr)
+                }
+            }
+            return
+        }
+        fputs("SixFingers: bundled font \(name).\(ext) not found in any known location\n", stderr)
     }
 
     /// Safety net so we never freeze on a countdown digit if the engine forgets to
@@ -376,8 +450,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         switch overlay {
         case .text(let value):
             let text = value as NSString
-            // Silkscreen is a pixel/bitmap font — bundled via registerBundledFonts(). The
-            // system-font fallback only fires if registration failed for some reason.
+            // Silkscreen is a pixel/bitmap font — bundled via registerBundledFont(named:ext:).
+            // The system-font fallback only fires if registration failed for some reason.
             let font = NSFont(name: "Silkscreen", size: 12)
                 ?? NSFont.systemFont(ofSize: 11, weight: .heavy)
             let attrs: [NSAttributedString.Key: Any] = [
@@ -434,6 +508,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     func buildMenu() {
         let menu = NSMenu()
+        populateMenuItems(into: menu, includeQuit: true)
+        statusItem.menu = menu
+    }
+
+    /// Shared item layout for the menu-bar dropdown and the dock right-click menu.
+    /// The dock menu skips Quit because macOS appends its own.
+    private func populateMenuItems(into menu: NSMenu, includeQuit: Bool) {
         let settings = SettingsManager.shared.load()
 
         // Disabled "status banner" — the only place text describes what the icon means.
@@ -448,14 +529,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         statusHeaderItem = header
         statusHeaderSeparator = headerSeparator
 
-        // Draw
-        let drawItem = NSMenuItem(title: "Draw...", action: #selector(onDraw), keyEquivalent: "")
+        // Draw — keyEquivalent here is for *display only*; the system-wide trigger
+        // lives in `drawHotKey` so it fires even when the menu is closed.
+        let drawBinding = KeyBinding.draw
+        let drawItem = NSMenuItem(
+            title: "Draw...",
+            action: #selector(onDraw),
+            keyEquivalent: drawBinding.menuKeyEquivalent
+        )
+        drawItem.keyEquivalentModifierMask = drawBinding.modifiers
         drawItem.target = self
         menu.addItem(drawItem)
 
         menu.addItem(.separator())
 
-        // Recent
         let recents = SettingsManager.shared.loadRecents()
         if !recents.isEmpty {
             let recentMenu = NSMenu()
@@ -476,7 +563,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             menu.addItem(recentItem)
         }
 
-        // Narrator
         let narratorItem = NSMenuItem(title: "Narrator", action: #selector(onToggleNarrator(_:)), keyEquivalent: "")
         narratorItem.target = self
         narratorItem.state = settings.narratorEnabled ? .on : .off
@@ -484,23 +570,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
         menu.addItem(.separator())
 
-        // Settings
         let settingsItem = NSMenuItem(title: "Settings...", action: #selector(onSettings), keyEquivalent: "")
         settingsItem.target = self
         menu.addItem(settingsItem)
 
-        // About
         let aboutItem = NSMenuItem(title: "About", action: #selector(onAbout), keyEquivalent: "")
         aboutItem.target = self
         menu.addItem(aboutItem)
 
-        menu.addItem(.separator())
-
-        let quitItem = NSMenuItem(title: "Quit", action: #selector(onQuit), keyEquivalent: "q")
-        quitItem.target = self
-        menu.addItem(quitItem)
-
-        statusItem.menu = menu
+        if includeQuit {
+            menu.addItem(.separator())
+            let quitItem = NSMenuItem(title: "Quit", action: #selector(onQuit), keyEquivalent: "q")
+            quitItem.target = self
+            menu.addItem(quitItem)
+        }
     }
 
     // MARK: - Actions
@@ -517,12 +600,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             return
         }
 
-        // If no API key, offer settings or random draw
+        // If no API key, walk new users through the drawing workflow.
         if SettingsManager.shared.getApiKey() == nil {
             let noKey = NSAlert()
-            noKey.messageText = "Let me draw something for you"
-            noKey.informativeText = "Open any drawing app and select a brush — I'll take it from there.\n\nWant me to draw anything you can imagine? Set up an AI provider in Settings."
-            noKey.addButton(withTitle: "Draw something now")
+            noKey.messageText = "Welcome to SixFingers"
+            noKey.informativeText = """
+            SixFingers uses your mouse to draw anything you dream of.
+
+            Here's how it works:
+            1. Open your favorite drawing app or site (Photoshop, Procreate, Kleki, etc.) and pick a brush.
+            2. Click the SixFingers menu bar icon and choose Draw…
+
+            No drawing app handy? I can open Kleki — a free in-browser drawing pad that loads with a brush ready to go.
+
+            Want me to draw anything you can imagine? Set up an AI provider in Settings.
+            """
+            noKey.addButton(withTitle: "Open Kleki.com")
+            noKey.addButton(withTitle: "Draw a sample")
             noKey.addButton(withTitle: "Open Settings")
             noKey.addButton(withTitle: "Cancel")
             if let icon = appIcon { noKey.icon = icon }
@@ -531,8 +625,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
             let r = noKey.runModal()
             if r == .alertFirstButtonReturn {
-                drawRandomImage()
+                if let url = URL(string: "https://kleki.com/") {
+                    NSWorkspace.shared.open(url)
+                }
             } else if r == .alertSecondButtonReturn {
+                drawRandomImage()
+            } else if r == .alertThirdButtonReturn {
                 settingsController.show { [weak self] in self?.buildMenu() }
             }
             return
@@ -780,31 +878,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         NSApp.terminate(nil)
     }
 
-    /// Menu-bar-only apps ignore `activate` while `.accessory`; we briefly use `.regular` so alerts appear above Settings.
-    private func presentAttentionAlertThenRestoreAccessory(messageText: String, informativeText: String, completion: @escaping () -> Void) {
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
-        defer { NSApp.setActivationPolicy(.accessory) }
-        let alert = NSAlert()
-        alert.messageText = messageText
-        alert.informativeText = informativeText
-        alert.addButton(withTitle: "OK")
-        if let icon = appIcon { alert.icon = icon }
-        alert.alertStyle = .informational
-        alert.window.level = .floating
-        alert.runModal()
-        completion()
-    }
-
+    /// Clicking the dock icon (or reopening via Finder/Spotlight) starts a new draw flow.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // Brief dock blip so the click registers — we are still a menu bar app and
-        // route back to .accessory after a moment. The "pen icon in menu bar" status
-        // text that used to live here moved into the dropdown's status header.
-        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            NSApp.setActivationPolicy(.accessory)
-        }
+        onDraw()
         return true
     }
 
@@ -813,11 +890,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         let present = { [weak self] in
             guard let self else { return }
             let alert = NSAlert()
-            alert.messageText = "Accessibility permission required"
-            alert.informativeText =
-                "SixFingers cannot move the mouse or draw until this exact program is allowed under Privacy & Security → Accessibility:\n\n\(accessibilityExecutablePathForHelp())\n\nIf SixFingers already appears enabled, macOS may have toggled a different build (the installed app vs a Terminal debug binary). Enable the row that matches this path."
-            alert.addButton(withTitle: "Open Accessibility Settings")
-            alert.addButton(withTitle: "OK")
+            alert.messageText = "SixFingers needs Accessibility access"
+            alert.informativeText = "Turn on SixFingers in System Settings → Privacy & Security → Accessibility to start drawing."
+            alert.addButton(withTitle: "Open Settings")
+            alert.addButton(withTitle: "Cancel")
             if let icon = self.appIcon { alert.icon = icon }
             alert.window.level = .floating
             NSApp.activate(ignoringOtherApps: true)
@@ -834,10 +910,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     func showPermissionDialog() {
         let alert = NSAlert()
-        alert.messageText = "SixFingers needs accessibility access"
-        alert.informativeText =
-            "This lets SixFingers control your mouse to draw.\n\nmacOS enables Accessibility per executable path and code identity. Enable the list row that matches this path:\n\n\(accessibilityExecutablePathForHelp())\n\nIf SixFingers exists in /Applications and also under dist (or elsewhere), Settings can show ON for one path while this run still uses another; expand the list or remove duplicate rows and add only this binary path.\n\nUnsigned or ad-hoc rebuilds change the signature: if it stays stuck, remove SixFingers with −, quit us, reopen from this same path, then enable again; or run: tccutil reset Accessibility com.dotfunlabs.sixfingers\n\nAfter you enable the matching row, we detect it about once per second."
-        alert.addButton(withTitle: "Open System Settings")
+        alert.messageText = "Allow SixFingers to control your mouse?"
+        alert.informativeText = "SixFingers needs Accessibility access to draw on your screen. Turn it on in System Settings, then come back here to start drawing."
+        alert.addButton(withTitle: "Open Settings")
         alert.addButton(withTitle: "Quit")
         if let icon = appIcon { alert.icon = icon }
         alert.window.level = .floating
@@ -849,7 +924,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             return
         }
 
-        promptSystemAccessibilityRegistration()
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
 
         startAccessibilityTrustPolling()
@@ -894,31 +968,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     private func handleAccessibilityTrustGranted() {
+        // Skip the "you're all set" confirmation — jump straight into the draw flow.
         setTrayState(.idle)
-        presentAttentionAlertThenRestoreAccessory(
-            messageText: "Accessibility enabled",
-            informativeText: "SixFingers stays in the menu bar at the top of the screen (near the clock). Look for the pen icon.\n\nRunning open SixFingers.app again focuses us here if the icon is hard to spot."
-        ) { [weak self] in
-            guard let self else { return }
-            if SettingsManager.shared.getApiKey() == nil {
-                self.onDraw()
-            }
-        }
+        NSApp.activate(ignoringOtherApps: true)
+        onDraw()
     }
 
     private func handleAccessibilityTrustWaitTimedOut() {
         setTrayState(.idle)
-        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        defer { NSApp.setActivationPolicy(.accessory) }
 
         let alert = NSAlert()
         alert.messageText = "Still waiting for Accessibility"
-        alert.informativeText =
-            "macOS has not granted trust to this build after \(Int(AccessibilityPolling.maxWaitSeconds)) seconds.\n\n\(accessibilityExecutablePathForHelp())\n\nCommon cause: Accessibility is ON for /Applications/SixFingers.app but we are running from dist (or the opposite). Those are separate paths; turn ON the row that matches the path above, or remove both SixFingers entries and add only this app.\n\nAd-hoc rebuilds also change the signature: remove SixFingers with −, quit us, reopen from this path, enable again; or run: tccutil reset Accessibility com.dotfunlabs.sixfingers\n\nYou can keep waiting if permissions are still updating.\n\nWe use no Dock icon; after any alert closes, look for the pen icon in the menu bar."
-        alert.addButton(withTitle: "Continue waiting")
-        alert.addButton(withTitle: "Open System Settings")
-        alert.addButton(withTitle: "Dismiss")
+        alert.informativeText = "Once SixFingers is turned on in Privacy & Security → Accessibility, we'll start drawing automatically."
+        alert.addButton(withTitle: "Keep Waiting")
+        alert.addButton(withTitle: "Open Settings")
+        alert.addButton(withTitle: "Cancel")
         if let icon = appIcon { alert.icon = icon }
         alert.alertStyle = .informational
         alert.window.level = .floating
@@ -928,7 +993,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         case .alertFirstButtonReturn:
             startAccessibilityTrustPolling()
         case .alertSecondButtonReturn:
-            promptSystemAccessibilityRegistration()
             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
             startAccessibilityTrustPolling()
         default:

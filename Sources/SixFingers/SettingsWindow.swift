@@ -29,7 +29,7 @@ class SettingsWindowController: NSObject, NSWindowDelegate {
 
         let allStyleCount = builtInStyles.count + s.customStyles.count
         let styleRows = (allStyleCount + 1) / 2
-        let windowH = 440 + styleRows * 22 + 40  // base + free mode + styles + add button
+        let windowH = 440 + styleRows * 22 + 40
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: windowH),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.level = .floating
