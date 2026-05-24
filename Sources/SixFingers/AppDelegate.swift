@@ -106,14 +106,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     func setStatus(_ text: String) {
+        // We keep this function so existing call sites compile, but the menu bar
+        // shows only the pen icon — no text next to it, in any state.
+        _ = text
         DispatchQueue.main.async {
             guard let button = self.statusItem.button else { return }
-            if text.isEmpty {
-                button.title = ""
-                button.image?.isTemplate = true  // just show icon
-            } else {
-                button.title = " \(text)"  // space before text for padding from icon
-            }
+            button.title = ""
+            button.image?.isTemplate = true
         }
     }
 
@@ -455,22 +454,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         NSApp.terminate(nil)
     }
 
-    /// Menu-bar-only apps ignore `activate` while `.accessory`; we briefly use `.regular` so alerts appear above Settings.
-    private func presentAttentionAlertThenRestoreAccessory(messageText: String, informativeText: String, completion: @escaping () -> Void) {
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
-        defer { NSApp.setActivationPolicy(.accessory) }
-        let alert = NSAlert()
-        alert.messageText = messageText
-        alert.informativeText = informativeText
-        alert.addButton(withTitle: "OK")
-        if let icon = appIcon { alert.icon = icon }
-        alert.alertStyle = .informational
-        alert.window.level = .floating
-        alert.runModal()
-        completion()
-    }
-
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
@@ -487,11 +470,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         let present = { [weak self] in
             guard let self else { return }
             let alert = NSAlert()
-            alert.messageText = "Accessibility permission required"
-            alert.informativeText =
-                "SixFingers cannot move the mouse or draw until this exact program is allowed under Privacy & Security → Accessibility:\n\n\(accessibilityExecutablePathForHelp())\n\nIf SixFingers already appears enabled, macOS may have toggled a different build (the installed app vs a Terminal debug binary). Enable the row that matches this path."
-            alert.addButton(withTitle: "Open Accessibility Settings")
-            alert.addButton(withTitle: "OK")
+            alert.messageText = "SixFingers needs Accessibility access"
+            alert.informativeText = "Turn on SixFingers in System Settings → Privacy & Security → Accessibility to start drawing."
+            alert.addButton(withTitle: "Open Settings")
+            alert.addButton(withTitle: "Cancel")
             if let icon = self.appIcon { alert.icon = icon }
             alert.window.level = .floating
             NSApp.activate(ignoringOtherApps: true)
@@ -508,10 +490,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     func showPermissionDialog() {
         let alert = NSAlert()
-        alert.messageText = "SixFingers needs accessibility access"
-        alert.informativeText =
-            "This lets SixFingers control your mouse to draw.\n\nmacOS enables Accessibility per executable path and code identity. Enable the list row that matches this path:\n\n\(accessibilityExecutablePathForHelp())\n\nIf SixFingers exists in /Applications and also under dist (or elsewhere), Settings can show ON for one path while this run still uses another; expand the list or remove duplicate rows and add only this binary path.\n\nUnsigned or ad-hoc rebuilds change the signature: if it stays stuck, remove SixFingers with −, quit us, reopen from this same path, then enable again; or run: tccutil reset Accessibility com.dotfunlabs.sixfingers\n\nAfter you enable the matching row, we detect it about once per second."
-        alert.addButton(withTitle: "Open System Settings")
+        alert.messageText = "Allow SixFingers to control your mouse?"
+        alert.informativeText = "SixFingers needs Accessibility access to draw on your screen. Turn it on in System Settings, then come back here to start drawing."
+        alert.addButton(withTitle: "Open Settings")
         alert.addButton(withTitle: "Quit")
         if let icon = appIcon { alert.icon = icon }
         alert.window.level = .floating
@@ -568,19 +549,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     private func handleAccessibilityTrustGranted() {
-        presentAttentionAlertThenRestoreAccessory(
-            messageText: "Accessibility enabled",
-            informativeText: "SixFingers stays in the menu bar at the top of the screen (near the clock). Look for the pen icon.\n\nRunning open SixFingers.app again focuses us here if the icon is hard to spot."
-        ) { [weak self] in
-            guard let self else { return }
-            self.setStatus("Accessibility on — menu bar → Draw…")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
-                self?.setStatus("")
-            }
-            if SettingsManager.shared.getApiKey() == nil {
-                self.onDraw()
-            }
-        }
+        // Skip the "you're all set" confirmation — jump straight into the draw flow.
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        defer { NSApp.setActivationPolicy(.accessory) }
+        onDraw()
     }
 
     private func handleAccessibilityTrustWaitTimedOut() {
@@ -591,11 +564,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
         let alert = NSAlert()
         alert.messageText = "Still waiting for Accessibility"
-        alert.informativeText =
-            "macOS has not granted trust to this build after \(Int(AccessibilityPolling.maxWaitSeconds)) seconds.\n\n\(accessibilityExecutablePathForHelp())\n\nCommon cause: Accessibility is ON for /Applications/SixFingers.app but we are running from dist (or the opposite). Those are separate paths; turn ON the row that matches the path above, or remove both SixFingers entries and add only this app.\n\nAd-hoc rebuilds also change the signature: remove SixFingers with −, quit us, reopen from this path, enable again; or run: tccutil reset Accessibility com.dotfunlabs.sixfingers\n\nYou can keep waiting if permissions are still updating.\n\nWe use no Dock icon; after any alert closes, look for the pen icon in the menu bar."
-        alert.addButton(withTitle: "Continue waiting")
-        alert.addButton(withTitle: "Open System Settings")
-        alert.addButton(withTitle: "Dismiss")
+        alert.informativeText = "Once SixFingers is turned on in Privacy & Security → Accessibility, we'll start drawing automatically."
+        alert.addButton(withTitle: "Keep Waiting")
+        alert.addButton(withTitle: "Open Settings")
+        alert.addButton(withTitle: "Cancel")
         if let icon = appIcon { alert.icon = icon }
         alert.alertStyle = .informational
         alert.window.level = .floating
