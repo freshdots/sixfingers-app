@@ -600,25 +600,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             return
         }
 
-        // If no API key, walk new users through the drawing workflow.
+        // No API key yet — collapse the old four-button onboarding into one CTA.
+        // "Try a sample" opens Kleki (free in-browser canvas) then kicks off the
+        // sample-drawing area picker, so the user reaches their first successful
+        // draw without having to choose between Kleki / sample / Settings up front.
+        // Settings stays one click away in the menu-bar dropdown and dock menu.
         if SettingsManager.shared.getApiKey() == nil {
             let noKey = NSAlert()
-            noKey.messageText = "Welcome to SixFingers"
-            noKey.informativeText = """
-            SixFingers uses your mouse to draw anything you dream of.
-
-            Here's how it works:
-            1. Open your favorite drawing app or site (Photoshop, Procreate, Kleki, etc.) and pick a brush.
-            2. Click the SixFingers menu bar icon and choose Draw…
-
-            No drawing app handy? I can open Kleki — a free in-browser drawing pad that loads with a brush ready to go.
-
-            Want me to draw anything you can imagine? Set up an AI provider in Settings.
-            """
-            noKey.addButton(withTitle: "Open Kleki.com")
-            noKey.addButton(withTitle: "Draw a sample")
-            noKey.addButton(withTitle: "Open Settings")
-            noKey.addButton(withTitle: "Cancel")
+            noKey.messageText = "SixFingers"
+            noKey.informativeText = "Draws anything you can imagine, right where your cursor is."
+            noKey.addButton(withTitle: "Try a sample")
+            noKey.addButton(withTitle: "Close")
             if let icon = appIcon { noKey.icon = icon }
             noKey.window.level = .floating
             NSApp.activate(ignoringOtherApps: true)
@@ -628,10 +620,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 if let url = URL(string: "https://kleki.com/") {
                     NSWorkspace.shared.open(url)
                 }
-            } else if r == .alertSecondButtonReturn {
                 drawRandomImage()
-            } else if r == .alertThirdButtonReturn {
-                settingsController.show { [weak self] in self?.buildMenu() }
             }
             return
         }
