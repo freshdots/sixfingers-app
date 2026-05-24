@@ -14,6 +14,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     var appIcon: NSImage?
 
+    /// Cached base hand icon — we composite overlays onto a copy of this every time the status changes.
+    private var baseTrayIcon: NSImage?
+
     /// Polls `AXIsProcessTrusted` after we send the user to Accessibility settings; never runs unbounded.
     private var accessibilityTrustTimer: Timer?
     private var accessibilityWaitStarted: Date?
@@ -77,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 if let img = NSImage(contentsOfFile: path) {
                     img.isTemplate = true
                     img.size = NSSize(width: 22, height: 22)
+                    baseTrayIcon = img
                     button.image = img
                     loaded = true
                     break
@@ -105,15 +109,126 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         accessibilityTrustTimer = nil
     }
 
+    /// What to render on top of the hand icon for a given status string. `nil` means icon-only.
+    private enum TrayBadge {
+        case digits(String)        // e.g. "5", "50", "100"  — drawn in pixel-font under the palm
+        case symbol(String)        // SF Symbol name — drawn centered over the hand
+    }
+
     func setStatus(_ text: String) {
-        // We keep this function so existing call sites compile, but the menu bar
-        // shows only the pen icon — no text next to it, in any state.
-        _ = text
+        let badge = Self.trayBadge(for: text)
         DispatchQueue.main.async {
             guard let button = self.statusItem.button else { return }
+            // Never put text next to the icon — the menu bar stays icon-only.
+            // Status info is overlaid onto the hand icon instead.
             button.title = ""
-            button.image?.isTemplate = true
+            button.image = self.renderTrayIcon(badge: badge)
         }
+    }
+
+    /// Map our internal status strings to a tray badge. Long instructional text gets no badge
+    /// (we just show the bare hand icon) — the user already has on-screen context for those.
+    private static func trayBadge(for text: String) -> TrayBadge? {
+        if text.isEmpty { return nil }
+
+        // "Drawing 50%" → "50"
+        if let m = text.range(of: #"Drawing (\d+)%"#, options: .regularExpression) {
+            let digits = text[m].filter(\.isNumber)
+            return .digits(String(digits))
+        }
+        // "Drawing in 5s" (countdown) → "5"
+        if let m = text.range(of: #"Drawing in (\d+)s"#, options: .regularExpression) {
+            let digits = text[m].filter(\.isNumber)
+            return .digits(String(digits))
+        }
+        // Accessibility wait countdown — "Waiting… 10s (Accessibility)" → "10"
+        if let m = text.range(of: #"Waiting… (\d+)s"#, options: .regularExpression) {
+            let digits = text[m].filter(\.isNumber)
+            return .digits(String(digits))
+        }
+        // "Listening (6s)..." mic countdown → "6"
+        if let m = text.range(of: #"Listening \((\d+)s\)"#, options: .regularExpression) {
+            let digits = text[m].filter(\.isNumber)
+            return .digits(String(digits))
+        }
+
+        // Terminal states
+        if text.contains("Done") { return .symbol("checkmark") }
+        if text.contains("Cancelled") { return .symbol("xmark") }
+        if text.contains("Failed") { return .symbol("exclamationmark") }
+
+        // Anything else (long instructions, "Thinking…", drag prompts, etc.) — icon only.
+        return nil
+    }
+
+    /// Composite the base hand icon with an optional overlay. Result is always a template image
+    /// so macOS recolors it correctly for light/dark menu bars.
+    private func renderTrayIcon(badge: TrayBadge?) -> NSImage {
+        let size = NSSize(width: 22, height: 22)
+        guard let base = baseTrayIcon else {
+            return NSImage(size: size)
+        }
+        guard let badge = badge else {
+            return base
+        }
+
+        let img = NSImage(size: size)
+        img.lockFocus()
+        defer { img.unlockFocus() }
+
+        switch badge {
+        case .digits(let digits):
+            // Hand icon faded so the digits read clearly on top.
+            base.draw(in: NSRect(origin: .zero, size: size),
+                      from: NSRect(origin: .zero, size: base.size),
+                      operation: .sourceOver,
+                      fraction: 0.35)
+
+            // Small bold monospaced digits, centered over the icon — gives a tight, pixel-y badge.
+            // macOS will recolor the result via the template flag, so any opaque color works.
+            let fontSize: CGFloat = digits.count >= 3 ? 9 : 11
+            let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .heavy)
+            let style = NSMutableParagraphStyle()
+            style.alignment = .center
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: NSColor.black,
+                .paragraphStyle: style,
+                .kern: -0.5
+            ]
+            let str = NSAttributedString(string: digits, attributes: attrs)
+            let textSize = str.size()
+            let rect = NSRect(
+                x: 0,
+                y: (size.height - textSize.height) / 2,
+                width: size.width,
+                height: textSize.height
+            )
+            str.draw(in: rect)
+
+        case .symbol(let name):
+            // Draw hand icon at full strength, then the SF Symbol on top center.
+            base.draw(in: NSRect(origin: .zero, size: size),
+                      from: NSRect(origin: .zero, size: base.size),
+                      operation: .sourceOver,
+                      fraction: 0.45)
+
+            if let sym = NSImage(systemSymbolName: name, accessibilityDescription: nil) {
+                let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .heavy)
+                let glyph = sym.withSymbolConfiguration(config) ?? sym
+                let gs = glyph.size
+                let rect = NSRect(
+                    x: (size.width - gs.width) / 2,
+                    y: (size.height - gs.height) / 2,
+                    width: gs.width,
+                    height: gs.height
+                )
+                glyph.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
+            }
+        }
+
+        img.isTemplate = true
+        return img
     }
 
     func buildMenu() {
@@ -504,7 +619,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             return
         }
 
-        promptSystemAccessibilityRegistration()
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
 
         startAccessibilityTrustPolling()
@@ -577,7 +691,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         case .alertFirstButtonReturn:
             startAccessibilityTrustPolling()
         case .alertSecondButtonReturn:
-            promptSystemAccessibilityRegistration()
             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
             startAccessibilityTrustPolling()
         default:
