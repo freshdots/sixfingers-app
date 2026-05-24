@@ -190,12 +190,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             return
         }
 
-        // If no API key, offer settings or random draw
+        // If no API key, walk new users through the drawing workflow.
         if SettingsManager.shared.getApiKey() == nil {
             let noKey = NSAlert()
-            noKey.messageText = "Let me draw something for you"
-            noKey.informativeText = "Open any drawing app and select a brush — I'll take it from there.\n\nWant me to draw anything you can imagine? Set up an AI provider in Settings."
-            noKey.addButton(withTitle: "Draw something now")
+            noKey.messageText = "Welcome to SixFingers"
+            noKey.informativeText = """
+            SixFingers uses your mouse to draw anything you dream of.
+
+            Here's how it works:
+            1. Open your favorite drawing app or site (Photoshop, Procreate, Kleki, etc.) and pick a brush.
+            2. Click the SixFingers menu bar icon and choose Draw…
+
+            No drawing app handy? I can open Kleki — a free in-browser drawing pad that loads with a brush ready to go.
+
+            Want me to draw anything you can imagine? Set up an AI provider in Settings.
+            """
+            noKey.addButton(withTitle: "Open Kleki.com")
+            noKey.addButton(withTitle: "Draw a sample")
             noKey.addButton(withTitle: "Open Settings")
             noKey.addButton(withTitle: "Cancel")
             if let icon = appIcon { noKey.icon = icon }
@@ -204,8 +215,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
             let r = noKey.runModal()
             if r == .alertFirstButtonReturn {
-                drawRandomImage()
+                if let url = URL(string: "https://kleki.com/") {
+                    NSWorkspace.shared.open(url)
+                }
             } else if r == .alertSecondButtonReturn {
+                drawRandomImage()
+            } else if r == .alertThirdButtonReturn {
                 settingsController.show { [weak self] in self?.buildMenu() }
             }
             return
