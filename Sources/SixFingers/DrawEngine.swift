@@ -43,13 +43,6 @@ func accessibilityExecutablePathForHelp() -> String {
     Bundle.main.executableURL?.path ?? ProcessInfo.processInfo.arguments[0]
 }
 
-/// Registers this executable with Accessibility so System Settings can enable the right row (may show a short system prompt).
-func promptSystemAccessibilityRegistration() {
-    let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-    let options = [promptKey: true] as CFDictionary
-    _ = AXIsProcessTrustedWithOptions(options)
-}
-
 struct DrawSettings {
     var threshold: Int = 100
     var detailWidth: Int = 420

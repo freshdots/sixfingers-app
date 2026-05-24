@@ -106,13 +106,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     func setStatus(_ text: String) {
-        // We keep this function so existing call sites compile, but the menu bar
-        // shows only the pen icon — no text next to it, in any state.
-        _ = text
         DispatchQueue.main.async {
             guard let button = self.statusItem.button else { return }
-            button.title = ""
-            button.image?.isTemplate = true
+            if text.isEmpty {
+                button.title = ""
+                button.image?.isTemplate = true
+            } else {
+                button.title = " \(text)"
+            }
         }
     }
 
@@ -504,7 +505,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             return
         }
 
-        promptSystemAccessibilityRegistration()
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
 
         startAccessibilityTrustPolling()
@@ -577,7 +577,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         case .alertFirstButtonReturn:
             startAccessibilityTrustPolling()
         case .alertSecondButtonReturn:
-            promptSystemAccessibilityRegistration()
             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
             startAccessibilityTrustPolling()
         default:
