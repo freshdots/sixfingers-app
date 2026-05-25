@@ -132,6 +132,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     private var accessibilityTrustTimer: Timer?
     private var accessibilityWaitStarted: Date?
     private var lastAccessibilityStatusSecond: Int = -1
+    /// Optional continuation fired once Accessibility flips to trusted. The first-launch path uses this
+    /// to chain into the welcome sheet *after* permissions are granted (so the user isn't interrupted
+    /// mid-Kleki by a permission ask); the ad-hoc ⌥⇧6-without-trust path leaves it nil and falls back
+    /// to the default "start drawing now" behavior.
+    private var pendingPostAccessibilityAction: (() -> Void)?
 
     private enum AccessibilityPolling {
         static let interval: TimeInterval = 1
@@ -141,7 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     static let welcomeSheetSeenVersionKey = "welcomeSheetSeenForVersion"
     /// Bump when onboarding copy changes meaningfully so existing users see the new sheet once.
-    static let currentWelcomeSheetVersion = 4
+    static let currentWelcomeSheetVersion = 5
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         #if DEBUG
@@ -218,14 +223,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         buildMenu()
         registerDrawHotKey()
 
-        // First launch: introduce the app, then check permissions. The welcome sheet
-        // is the single onboarding surface — don't chain into onDraw afterwards or the
-        // user gets a second dialog stacked on top of the one they just dismissed.
+        // First launch: settle permissions BEFORE onboarding. If we show the welcome
+        // sheet first and the user clicks "Open free drawing app", focus jumps to the
+        // browser and our Accessibility ask interrupts them mid-Kleki. Asking up front
+        // keeps the user in SixFingers context until the OS-level grant is done; only
+        // then do we send them to Kleki, with the area picker landing on top of the
+        // canvas in one continuous beat.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-            self.showWelcomeSheetIfNeeded()
             if !checkAccessibilityForDrawing() {
-                // Show permission request dialog that waits
-                self.showPermissionDialog()
+                self.showPermissionDialog { [weak self] in
+                    self?.showWelcomeSheetIfNeeded()
+                }
+            } else {
+                self.showWelcomeSheetIfNeeded()
             }
         }
     }
@@ -264,11 +274,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         alert.window.level = .floating
         let response = alert.runModal()
 
+        UserDefaults.standard.set(AppDelegate.currentWelcomeSheetVersion, forKey: AppDelegate.welcomeSheetSeenVersionKey)
+
+        // Accessibility was already settled before this sheet showed, so we can drop the
+        // user straight into the sample-draw picker. "Open free drawing app" gets Kleki
+        // out in front of the picker first; "I have my app open" trusts that the user's
+        // drawing surface is already frontmost.
         if response == .alertFirstButtonReturn, let url = URL(string: "https://kleki.com/") {
             NSWorkspace.shared.open(url)
+            // Give Kleki a beat to come up before the picker overlay drops on it.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.drawRandomImage()
+            }
+        } else {
+            drawRandomImage()
         }
-
-        UserDefaults.standard.set(AppDelegate.currentWelcomeSheetVersion, forKey: AppDelegate.welcomeSheetSeenVersionKey)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -950,7 +970,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
     }
 
-    func showPermissionDialog() {
+    /// `then` runs once Accessibility flips to trusted. The first-launch flow passes a closure that
+    /// shows the welcome sheet so onboarding happens *after* permissions; ad-hoc callers pass nil
+    /// and `handleAccessibilityTrustGranted` falls back to the default draw flow.
+    func showPermissionDialog(then completion: (() -> Void)? = nil) {
         let alert = NSAlert()
         alert.messageText = "Allow SixFingers to control your mouse?"
         alert.informativeText = "SixFingers needs Accessibility access to draw on your screen. Turn it on in System Settings, then come back here to start drawing."
@@ -966,6 +989,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             return
         }
 
+        pendingPostAccessibilityAction = completion
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
 
         startAccessibilityTrustPolling()
@@ -1010,14 +1034,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     private func handleAccessibilityTrustGranted() {
-        // First-launch only path — the welcome sheet already gave the user a choice
-        // ("Open free drawing app" / "I have my app open") and that choice has already
-        // run. Routing through `onDraw()` here would re-render the same two buttons via
-        // the no-API-key branch, which reads to the user as the welcome dialog popping
-        // up a second time. Jump straight to the sample-draw picker (or the prompt
-        // window if a key is set up) instead.
         setTrayState(.idle)
         NSApp.activate(ignoringOtherApps: true)
+
+        // If a continuation was queued (first-launch path → run welcome sheet now that
+        // permissions are settled), honor it and stop. Otherwise the user got here via
+        // ⌥⇧6 / menu draw without trust and is expecting drawing to resume.
+        if let next = pendingPostAccessibilityAction {
+            pendingPostAccessibilityAction = nil
+            next()
+            return
+        }
+
         if SettingsManager.shared.getApiKey() == nil {
             drawRandomImage()
         } else {
