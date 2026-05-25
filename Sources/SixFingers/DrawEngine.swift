@@ -148,6 +148,15 @@ var onPauseHandler: (() -> Bool)?
 
 func drawPolylines(rect: DrawRect, binaryWidth: Int, binaryHeight: Int,
                    polylines: [Polyline], speed: Double, onProgress: ((String) -> Void)?) throws {
+    // We click at the first stroke's start point a few times to guarantee the target window
+    // (Kleki, Photoshop, Procreate, …) is frontmost and accepting input before we begin.
+    // Without this the first strokes can be eaten by whatever app was active when the
+    // countdown ended (menubar dropdown, Finder, etc.).
+    // Triple-click selects a line in text fields, but canvas surfaces in drawing apps are
+    // not text — safe here. Tune via the constants below.
+    let focusClickCount = 3
+    let focusClickDelayUs: UInt32 = 40000 // 40ms between clicks
+
     let fitScale = min(Double(rect.width) / Double(max(1, binaryWidth-1)),
                        Double(rect.height) / Double(max(1, binaryHeight-1)))
     let fillScale = max(Double(rect.width) / Double(max(1, binaryWidth-1)),
@@ -161,6 +170,21 @@ func drawPolylines(rect: DrawRect, binaryWidth: Int, binaryHeight: Int,
 
     MouseControl.mouseUp()
     usleep(30000)
+
+    // Focus-click the first stroke's start point so the window under it comes to the front
+    // before we lay down any real ink. Skipped if every polyline is empty.
+    if let firstPath = polylines.first(where: { !$0.isEmpty }) {
+        let fx = offsetX + Double(firstPath[0].0) * uniformScale
+        let fy = offsetY + Double(firstPath[0].1) * uniformScale
+        MouseControl.moveTo(fx, fy)
+        usleep(focusClickDelayUs)
+        for _ in 0..<focusClickCount {
+            MouseControl.mouseDown()
+            usleep(focusClickDelayUs)
+            MouseControl.mouseUp()
+            usleep(focusClickDelayUs)
+        }
+    }
 
     for (idx, path) in polylines.enumerated() {
         if escapePressed {
