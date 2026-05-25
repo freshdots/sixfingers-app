@@ -141,7 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     static let welcomeSheetSeenVersionKey = "welcomeSheetSeenForVersion"
     /// Bump when onboarding copy changes meaningfully so existing users see the new sheet once.
-    static let currentWelcomeSheetVersion = 2
+    static let currentWelcomeSheetVersion = 3
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         #if DEBUG
@@ -240,6 +240,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     /// One-time onboarding sheet. Version-bumped so future copy changes can re-show
     /// without retroactively forcing it on users who already dismissed an older version.
+    ///
+    /// Two paths, no dead-end: either the user already has a drawing app open and we
+    /// step out of the way, or we drop them straight into Kleki (free in-browser canvas)
+    /// so the next ⌥⇧6 press has somewhere to draw.
     private func showWelcomeSheetIfNeeded() {
         let seen = UserDefaults.standard.integer(forKey: AppDelegate.welcomeSheetSeenVersionKey)
         if seen >= AppDelegate.currentWelcomeSheetVersion { return }
@@ -248,12 +252,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
         let alert = NSAlert()
         alert.messageText = "Welcome to SixFingers"
-        alert.informativeText = "SixFingers lives in your menu bar and Dock. Press ⌥⇧6 anywhere to start a draw, or click the Dock icon."
-        alert.addButton(withTitle: "Got it")
+        alert.informativeText = "SixFingers lives in your menu bar and Dock. Press ⌥⇧6 anywhere to draw into whatever app is in front — Photoshop, Procreate, or a free in-browser canvas."
+        // First button is the rightmost / default — keep "Open free drawing app" primary
+        // so users without a drawing app reach a working canvas in one click.
+        alert.addButton(withTitle: "Open free drawing app")
+        alert.addButton(withTitle: "Use your own app")
         alert.alertStyle = .informational
         if let icon = appIcon { alert.icon = icon }
         alert.window.level = .floating
-        alert.runModal()
+        let response = alert.runModal()
+
+        if response == .alertFirstButtonReturn, let url = URL(string: "https://kleki.com/") {
+            NSWorkspace.shared.open(url)
+        }
 
         UserDefaults.standard.set(AppDelegate.currentWelcomeSheetVersion, forKey: AppDelegate.welcomeSheetSeenVersionKey)
     }
