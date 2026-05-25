@@ -523,25 +523,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     /// Hand-rendered padlock on the same 2-point pixel grid as `drawPixelCheckKnockout`.
     /// Used as the permission-waiting overlay so the icon reads as "blocked / no access"
-    /// instead of a draw countdown (EAR-45). Sized and positioned as a corner badge —
-    /// roughly 40% of the icon footprint, anchored to the bottom-right so the hand
-    /// stays the dominant visual at menubar size. Shape: 4×5 grid — shackle arc on
-    /// top two rows, solid body below with a single-pixel keyhole gap.
+    /// instead of a draw countdown (EAR-45). Sized and positioned to live in the *palm*
+    /// area — same center point and visual weight as the countdown digit overlay — so
+    /// the lock reads as the same kind of in-palm status indicator the countdown is,
+    /// not a corner badge. Footprint matches a single Silkscreen digit (~6×10pt), so
+    /// the hand silhouette stays the dominant shape. Shape on a 3×5 grid: shackle arc
+    /// on top two rows, body below with a one-pixel keyhole gap.
     private func drawPixelLockKnockout(in rect: NSRect) {
         let pixel: CGFloat = 2
         let cells: [(Int, Int)] = [
-            (1, 4), (2, 4),
-            (0, 3),         (3, 3),
-            (0, 2), (1, 2), (2, 2), (3, 2),
-            (0, 1),                 (3, 1),
-            (0, 0), (1, 0), (2, 0), (3, 0),
+            (1, 4),
+            (0, 3),         (2, 3),
+            (0, 2), (1, 2), (2, 2),
+            (0, 1),         (2, 1),
+            (0, 0), (1, 0), (2, 0),
         ]
-        let glyphCols = 4
+        let glyphCols = 3
+        let glyphRows = 5
         let glyphWidth = CGFloat(glyphCols) * pixel
-        // Bottom-right badge: hug the right edge and sit flush to the bottom with a
-        // 1pt inset so the lock body never bleeds outside the icon rect.
-        let originX = rect.width - glyphWidth - 1
-        let originY: CGFloat = 1
+        let glyphHeight = CGFloat(glyphRows) * pixel
+        // Centred in the palm area with the same -3pt y-nudge the countdown text uses,
+        // so the lock's center point matches the digit's center point exactly.
+        let originX = (rect.width - glyphWidth) / 2
+        let originY = (rect.height - glyphHeight) / 2 - 3
         NSGraphicsContext.current?.compositingOperation = .destinationOut
         NSColor.black.setFill()
         for (col, row) in cells {
