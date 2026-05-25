@@ -79,6 +79,7 @@ class SettingsManager {
         }
 
         migrateLegacyKeysToKeychain()
+        keychain.purgeLegacyKeyClassItems()
         applyEnv()
     }
 
@@ -238,5 +239,29 @@ private final class APIKeychain {
             kSecAttrAccount: provider,
         ]
         SecItemDelete(query as CFDictionary)
+    }
+
+    // macOS evaluates keychain ACLs per item class. Older builds shipped a
+    // `kSecClassKey` item under the same logical identity as our generic
+    // password store, which caused a second "wants to access key …" prompt on
+    // every (re)install in addition to the generic-password prompt. We never
+    // read those items — the canonical API key store is `kSecClassGenericPassword`
+    // — so best-effort delete on launch under both the label and the
+    // application-tag attribute (the two places legacy builds stashed the
+    // service identifier on key-class items).
+    func purgeLegacyKeyClassItems() {
+        let labelQuery: [CFString: Any] = [
+            kSecClass: kSecClassKey,
+            kSecAttrLabel: service,
+        ]
+        SecItemDelete(labelQuery as CFDictionary)
+
+        if let tagData = service.data(using: .utf8) {
+            let tagQuery: [CFString: Any] = [
+                kSecClass: kSecClassKey,
+                kSecAttrApplicationTag: tagData,
+            ]
+            SecItemDelete(tagQuery as CFDictionary)
+        }
     }
 }
