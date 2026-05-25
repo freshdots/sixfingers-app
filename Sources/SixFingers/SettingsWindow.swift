@@ -136,7 +136,7 @@ class SettingsWindowController: NSObject, NSWindowDelegate {
         self.keyField = kf
         y -= 26
 
-        let sec = NSTextField(labelWithString: "Stored locally on your Mac. Never shared.")
+        let sec = NSTextField(labelWithString: "Stored in your Mac Keychain. Never shared.")
         sec.font = .systemFont(ofSize: 11)
         sec.textColor = subtle
         sec.frame = NSRect(x: 24, y: y + 6, width: 372, height: 12)

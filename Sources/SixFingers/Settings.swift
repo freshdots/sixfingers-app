@@ -79,6 +79,8 @@ class SettingsManager {
         }
 
         migrateLegacyKeysToKeychain()
+        keychain.migrateLegacyPerProviderItems()
+        keychain.purgeLegacyKeyClassItems()
         applyEnv()
     }
 
@@ -190,53 +192,125 @@ class SettingsManager {
 
 private final class APIKeychain {
     private let service = "com.dotfunlabs.sixfingers.api-keys"
+    private let account = "all"
+
+    // Cached after the first successful read so subsequent reads (e.g.
+    // switching provider tabs in Settings) never re-query the keychain.
+    // macOS evaluates the ACL on every SecItemCopyMatching call, so without
+    // this cache "Always Allow" still has to be re-evaluated on each tab
+    // change.
+    private var cache: [String: String]?
 
     func read(provider: String) -> String {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: provider,
-            kSecReturnData: true,
-            kSecMatchLimit: kSecMatchLimitOne,
-        ]
-
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess,
-              let data = item as? Data,
-              let value = String(data: data, encoding: .utf8) else {
-            return ""
-        }
-
-        return value
+        return loadAll()[provider] ?? ""
     }
 
     func upsert(provider: String, key: String) {
-        let data = Data(key.utf8)
+        var all = loadAll()
+        all[provider] = key
+        writeAll(all)
+    }
+
+    func delete(provider: String) {
+        var all = loadAll()
+        all.removeValue(forKey: provider)
+        writeAll(all)
+    }
+
+    // Older builds stored each provider's API key as its own
+    // `kSecClassGenericPassword` item (one per `kSecAttrAccount`). macOS
+    // evaluates ACLs per item, so the keychain prompt fired again every time
+    // the user switched provider tabs. We now collapse everything into a
+    // single item; this pulls any legacy per-provider items into the
+    // consolidated blob and deletes the originals.
+    func migrateLegacyPerProviderItems() {
+        var merged = loadAll()
+        var moved = false
+        for legacy in providers.keys {
+            let readQuery: [CFString: Any] = [
+                kSecClass: kSecClassGenericPassword,
+                kSecAttrService: service,
+                kSecAttrAccount: legacy,
+                kSecReturnData: true,
+                kSecMatchLimit: kSecMatchLimitOne,
+            ]
+            var item: CFTypeRef?
+            guard SecItemCopyMatching(readQuery as CFDictionary, &item) == errSecSuccess,
+                  let data = item as? Data,
+                  let value = String(data: data, encoding: .utf8),
+                  !value.isEmpty else { continue }
+
+            if merged[legacy] == nil { merged[legacy] = value }
+            moved = true
+
+            let deleteQuery: [CFString: Any] = [
+                kSecClass: kSecClassGenericPassword,
+                kSecAttrService: service,
+                kSecAttrAccount: legacy,
+            ]
+            SecItemDelete(deleteQuery as CFDictionary)
+        }
+        if moved { writeAll(merged) }
+    }
+
+    // macOS evaluates keychain ACLs per item class. Older builds shipped a
+    // `kSecClassKey` item under the same logical identity as our generic
+    // password store, which caused a second "wants to access key …" prompt on
+    // every (re)install in addition to the generic-password prompt. We never
+    // read those items — the canonical API key store is
+    // `kSecClassGenericPassword` — so best-effort delete on launch under both
+    // the label and the application-tag attribute (the two places legacy
+    // builds stashed the service identifier on key-class items).
+    func purgeLegacyKeyClassItems() {
+        let labelQuery: [CFString: Any] = [
+            kSecClass: kSecClassKey,
+            kSecAttrLabel: service,
+        ]
+        SecItemDelete(labelQuery as CFDictionary)
+
+        if let tagData = service.data(using: .utf8) {
+            let tagQuery: [CFString: Any] = [
+                kSecClass: kSecClassKey,
+                kSecAttrApplicationTag: tagData,
+            ]
+            SecItemDelete(tagQuery as CFDictionary)
+        }
+    }
+
+    private func loadAll() -> [String: String] {
+        if let cache = cache { return cache }
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
-            kSecAttrAccount: provider,
+            kSecAttrAccount: account,
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne,
         ]
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data,
+              let decoded = try? JSONDecoder().decode([String: String].self, from: data) else {
+            cache = [:]
+            return [:]
+        }
+        cache = decoded
+        return decoded
+    }
 
-        let attributes: [CFString: Any] = [
-            kSecValueData: data,
+    private func writeAll(_ keys: [String: String]) {
+        cache = keys
+        let data = (try? JSONEncoder().encode(keys)) ?? Data("{}".utf8)
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account,
         ]
-
+        let attributes: [CFString: Any] = [kSecValueData: data]
         let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if updateStatus == errSecSuccess { return }
 
         var item = query
         item[kSecValueData] = data
         SecItemAdd(item as CFDictionary, nil)
-    }
-
-    func delete(provider: String) {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: provider,
-        ]
-        SecItemDelete(query as CFDictionary)
     }
 }
