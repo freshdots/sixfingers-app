@@ -17,6 +17,7 @@ struct PromptResult {
 enum TrayOverlay: Equatable {
     case text(String)
     case pixelCheck
+    case pixelLock
 }
 
 /// Single source of truth for everything the user sees in the menu bar: icon tint,
@@ -79,12 +80,13 @@ enum TrayState: Equatable {
     }
 
     /// Glyph composited over the hand, knocked out with `.destinationOut`.
+    /// `.waitingPermission` deliberately uses a static lock glyph instead of the
+    /// elapsed-seconds digit (EAR-45): users read any digit in this slot as a
+    /// draw countdown, so the permission-wait state must never expose one.
     var iconOverlay: TrayOverlay? {
         switch self {
         case .countdown(let n): return .text("\(n)")
-        case .waitingPermission(let seconds):
-            if let seconds, seconds > 0 { return .text("\(seconds)") }
-            return nil
+        case .waitingPermission: return .pixelLock
         case .done: return .pixelCheck
         case .failed: return .text("X")
         case .cancelled: return .text("X")
@@ -470,6 +472,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             NSGraphicsContext.current?.compositingOperation = .sourceOver
         case .pixelCheck:
             drawPixelCheckKnockout(in: rect)
+        case .pixelLock:
+            drawPixelLockKnockout(in: rect)
         }
     }
 
@@ -492,6 +496,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         let glyphHeight = CGFloat(glyphRows) * pixel
         let originX = (rect.width - glyphWidth) / 2
         let originY = (rect.height - glyphHeight) / 2 - 3
+        NSGraphicsContext.current?.compositingOperation = .destinationOut
+        NSColor.black.setFill()
+        for (col, row) in cells {
+            let cell = NSRect(
+                x: originX + CGFloat(col) * pixel,
+                y: originY + CGFloat(row) * pixel,
+                width: pixel,
+                height: pixel
+            )
+            cell.fill()
+        }
+        NSGraphicsContext.current?.compositingOperation = .sourceOver
+    }
+
+    /// Hand-rendered padlock on the same 2-point pixel grid as `drawPixelCheckKnockout`.
+    /// Used as the permission-waiting overlay so the icon reads as "blocked / no access"
+    /// instead of a draw countdown (EAR-45). Sized and positioned as a corner badge —
+    /// roughly 40% of the icon footprint, anchored to the bottom-right so the hand
+    /// stays the dominant visual at menubar size. Shape: 4×5 grid — shackle arc on
+    /// top two rows, solid body below with a single-pixel keyhole gap.
+    private func drawPixelLockKnockout(in rect: NSRect) {
+        let pixel: CGFloat = 2
+        let cells: [(Int, Int)] = [
+            (1, 4), (2, 4),
+            (0, 3),         (3, 3),
+            (0, 2), (1, 2), (2, 2), (3, 2),
+            (0, 1),                 (3, 1),
+            (0, 0), (1, 0), (2, 0), (3, 0),
+        ]
+        let glyphCols = 4
+        let glyphWidth = CGFloat(glyphCols) * pixel
+        // Bottom-right badge: hug the right edge and sit flush to the bottom with a
+        // 1pt inset so the lock body never bleeds outside the icon rect.
+        let originX = rect.width - glyphWidth - 1
+        let originY: CGFloat = 1
         NSGraphicsContext.current?.compositingOperation = .destinationOut
         NSColor.black.setFill()
         for (col, row) in cells {
