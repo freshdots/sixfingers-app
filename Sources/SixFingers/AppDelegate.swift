@@ -1010,10 +1010,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     private func handleAccessibilityTrustGranted() {
-        // Skip the "you're all set" confirmation — jump straight into the draw flow.
+        // First-launch only path — the welcome sheet already gave the user a choice
+        // ("Open free drawing app" / "I have my app open") and that choice has already
+        // run. Routing through `onDraw()` here would re-render the same two buttons via
+        // the no-API-key branch, which reads to the user as the welcome dialog popping
+        // up a second time. Jump straight to the sample-draw picker (or the prompt
+        // window if a key is set up) instead.
         setTrayState(.idle)
         NSApp.activate(ignoringOtherApps: true)
-        onDraw()
+        if SettingsManager.shared.getApiKey() == nil {
+            drawRandomImage()
+        } else {
+            onDraw()
+        }
     }
 
     private func handleAccessibilityTrustWaitTimedOut() {
