@@ -141,7 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     static let welcomeSheetSeenVersionKey = "welcomeSheetSeenForVersion"
     /// Bump when onboarding copy changes meaningfully so existing users see the new sheet once.
-    static let currentWelcomeSheetVersion = 3
+    static let currentWelcomeSheetVersion = 4
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         #if DEBUG
@@ -218,14 +218,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         buildMenu()
         registerDrawHotKey()
 
-        // First launch: introduce the app, then check permissions, then open Draw.
+        // First launch: introduce the app, then check permissions. The welcome sheet
+        // is the single onboarding surface — don't chain into onDraw afterwards or the
+        // user gets a second dialog stacked on top of the one they just dismissed.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
             self.showWelcomeSheetIfNeeded()
             if !checkAccessibilityForDrawing() {
                 // Show permission request dialog that waits
                 self.showPermissionDialog()
-            } else if SettingsManager.shared.getApiKey() == nil {
-                self.onDraw()
             }
         }
     }
@@ -254,9 +254,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         alert.messageText = "Welcome to SixFingers"
         alert.informativeText = "SixFingers lives in your menu bar and Dock. Press ⌥⇧6 anywhere to draw into whatever app is in front — Photoshop, Procreate, or a free in-browser canvas."
         // First button is the rightmost / default — keep "Open free drawing app" primary
-        // so users without a drawing app reach a working canvas in one click.
+        // so users without a drawing app reach a working canvas in one click. The secondary
+        // label is past-tense ("I have my app open") so the user knows the precondition
+        // before they're dropped into canvas selection.
         alert.addButton(withTitle: "Open free drawing app")
-        alert.addButton(withTitle: "Use your own app")
+        alert.addButton(withTitle: "I have my app open")
         alert.alertStyle = .informational
         if let icon = appIcon { alert.icon = icon }
         alert.window.level = .floating
@@ -654,28 +656,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             return
         }
 
-        // No API key yet — collapse the old four-button onboarding into one CTA.
-        // "Try a sample" opens Kleki (free in-browser canvas) then kicks off the
-        // sample-drawing area picker, so the user reaches their first successful
-        // draw without having to choose between Kleki / sample / Settings up front.
-        // Settings stays one click away in the menu-bar dropdown and dock menu.
+        // No API key yet — mirror the EAR-47 welcome-sheet button design so we only
+        // have one onboarding vocabulary across the app. Without a key the only thing
+        // we can draw is a bundled sample; both buttons route there, the difference is
+        // whether we open Kleki first or assume the user's app is already in front.
         if SettingsManager.shared.getApiKey() == nil {
             let noKey = NSAlert()
             noKey.messageText = "SixFingers"
             noKey.informativeText = "Draws anything you can imagine, right where your cursor is."
-            noKey.addButton(withTitle: "Try a sample")
-            noKey.addButton(withTitle: "Close")
+            noKey.addButton(withTitle: "Open free drawing app")
+            noKey.addButton(withTitle: "I have my app open")
             if let icon = appIcon { noKey.icon = icon }
             noKey.window.level = .floating
             NSApp.activate(ignoringOtherApps: true)
 
             let r = noKey.runModal()
-            if r == .alertFirstButtonReturn {
-                if let url = URL(string: "https://kleki.com/") {
-                    NSWorkspace.shared.open(url)
-                }
-                drawRandomImage()
+            if r == .alertFirstButtonReturn, let url = URL(string: "https://kleki.com/") {
+                NSWorkspace.shared.open(url)
             }
+            drawRandomImage()
             return
         }
 
