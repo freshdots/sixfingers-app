@@ -923,7 +923,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     @objc func onAbout() {
         let alert = NSAlert()
         alert.messageText = "SixFingers"
-        alert.informativeText = "Drawing on its own.\n\nMade by Dot Fun Labs\nVersion 1.0.0\n\nFeedback: x.com/taydotfun"
+        alert.informativeText = "Drawing on its own.\n\nMade by Dot Fun Labs\nVersion 1.1.0\n\nFeedback: x.com/taydotfun"
         alert.alertStyle = .informational
         if let icon = appIcon { alert.icon = icon }
         alert.addButton(withTitle: "OK")
