@@ -117,6 +117,92 @@ private func geminiGenerate(prompt: String, rawPrompt: String, key: String) asyn
     throw NSError(domain: "", code: 3, userInfo: [NSLocalizedDescriptionKey: "No image returned"])
 }
 
+// MARK: - Closer line generation
+
+/// Asks the configured LLM to write a single short, natural closer line that
+/// reacts to the finished drawing. Strips quotes/punctuation noise. Returns
+/// nil if no chat-capable provider is configured or the call fails — caller
+/// should fall back to a bundled generic closer.
+func generateCloserText(prompt: String) async -> String? {
+    let s = SettingsManager.shared.load()
+    guard let key = SettingsManager.shared.getApiKey() else { return nil }
+
+    let system = """
+    You write one-line closing remarks for an art bot that just finished a drawing.
+    Extract the main subject from the user's prompt and react to it naturally —
+    do NOT repeat the prompt verbatim. Keep it under 12 words, casual, playful,
+    no exclamation marks stacked. Output the line and nothing else. No quotes.
+    Examples: "Hope you like the bike." · "There's your dragon." · "A penguin, hot off the press."
+    """
+    let user = "Prompt: \"\(prompt)\""
+
+    switch s.provider {
+    case "openai":
+        return try? await openaiCloser(system: system, user: user, key: key)
+    case "gemini":
+        return try? await geminiCloser(system: system, user: user, key: key)
+    default:
+        return nil
+    }
+}
+
+private func openaiCloser(system: String, user: String, key: String) async throws -> String? {
+    let body: [String: Any] = [
+        "model": "gpt-4o-mini",
+        "messages": [
+            ["role": "system", "content": system],
+            ["role": "user", "content": user],
+        ],
+        "max_tokens": 40,
+        "temperature": 0.9,
+    ]
+    let data = try JSONSerialization.data(withJSONObject: body)
+    var req = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
+    req.httpMethod = "POST"
+    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+    req.httpBody = data
+
+    let (resData, _) = try await URLSession.shared.data(for: req)
+    let json = try JSONSerialization.jsonObject(with: resData) as? [String: Any]
+    let choices = json?["choices"] as? [[String: Any]]
+    let msg = choices?.first?["message"] as? [String: Any]
+    let text = msg?["content"] as? String
+    return text.map(cleanCloser)
+}
+
+private func geminiCloser(system: String, user: String, key: String) async throws -> String? {
+    let body: [String: Any] = [
+        "contents": [["parts": [["text": "\(system)\n\n\(user)"]]]],
+        "generationConfig": ["temperature": 0.9, "maxOutputTokens": 40],
+    ]
+    let data = try JSONSerialization.data(withJSONObject: body)
+    var req = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=\(key)")!)
+    req.httpMethod = "POST"
+    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    req.httpBody = data
+
+    let (resData, _) = try await URLSession.shared.data(for: req)
+    let json = try JSONSerialization.jsonObject(with: resData) as? [String: Any]
+    let candidates = json?["candidates"] as? [[String: Any]]
+    let content = candidates?.first?["content"] as? [String: Any]
+    let parts = content?["parts"] as? [[String: Any]]
+    let text = parts?.first?["text"] as? String
+    return text.map(cleanCloser)
+}
+
+private func cleanCloser(_ raw: String) -> String {
+    var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    // Strip surrounding quotes the model sometimes adds despite instructions.
+    if let first = s.first, first == "\"" || first == "'" || first == "\u{201C}" {
+        s.removeFirst()
+    }
+    if let last = s.last, last == "\"" || last == "'" || last == "\u{201D}" {
+        s.removeLast()
+    }
+    return s.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
 // MARK: - TTS
 
 func speakText(_ text: String) async -> String? {

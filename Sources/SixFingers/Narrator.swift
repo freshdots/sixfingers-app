@@ -60,8 +60,10 @@ class Narrator: NSObject, AVAudioPlayerDelegate {
     private let minGap: TimeInterval = 8
     private var spokeEarly = false, spokeMid = false, spokeLate = false
     private var preEarly = "", preMid = "", preLate = "", preCloser = ""
+    private var promptCloserText: String?
     private var player: AVAudioPlayer?
     private var speaking = false
+    private var pendingSpeech: String?
 
     init(prompt: String, enabled: Bool = true) {
         self.prompt = prompt
@@ -86,14 +88,17 @@ class Narrator: NSObject, AVAudioPlayerDelegate {
         return nil
     }
 
-    private func speak(_ text: String) {
-        guard enabled, !speaking else { return }
+    private func speak(_ text: String, queueIfBusy: Bool = false) {
+        guard enabled else { return }
+        if speaking {
+            if queueIfBusy { pendingSpeech = text }
+            return
+        }
         speaking = true
 
         DispatchQueue.global().async { [weak self] in
             // Check memory cache
             if let cached = self?.cache[text] {
-                self?.lastSpeakTime = Date()
                 self?.play(cached)
                 return
             }
@@ -101,7 +106,6 @@ class Narrator: NSObject, AVAudioPlayerDelegate {
             // Check bundled audio
             if let bundled = Narrator.findBundledAudio(text) {
                 self?.cache[text] = bundled
-                self?.lastSpeakTime = Date()
                 self?.play(bundled)
                 return
             }
@@ -110,7 +114,6 @@ class Narrator: NSObject, AVAudioPlayerDelegate {
             Task {
                 if let path = await speakText(text) {
                     self?.cache[text] = path
-                    self?.lastSpeakTime = Date()
                     self?.play(path)
                 } else {
                     // Nothing played — don't block future speaks
@@ -136,6 +139,15 @@ class Narrator: NSObject, AVAudioPlayerDelegate {
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         speaking = false
+        // Update the gap clock from end-of-audio so minGap measures actual silence.
+        lastSpeakTime = Date()
+        if let pending = pendingSpeech {
+            pendingSpeech = nil
+            // Small breath so queued lines don't feel mashed together.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                self?.speak(pending)
+            }
+        }
     }
 
     private func canSpeak() -> Bool {
@@ -156,9 +168,19 @@ class Narrator: NSObject, AVAudioPlayerDelegate {
             speak(genericOpeners.randomElement()!)
         }
 
-        // Pre-cache
-        for line in [preEarly, preMid, preLate, preCloser] {
-            Task { let _ = await speakText(line) }
+        // Pre-generate a prompt-aware closer in the background. While the drawing runs
+        // (often a minute+), the LLM + TTS round-trip has time to land. We ask the LLM
+        // to write a short, natural closer that reacts to the subject — not the verbatim
+        // prompt — then TTS it. If anything fails or doesn't come back in time, onDone
+        // falls back to the bundled generic closer.
+        if SettingsManager.shared.getApiKey() != nil {
+            Task { [weak self] in
+                guard let self else { return }
+                guard let text = await generateCloserText(prompt: self.prompt), !text.isEmpty else { return }
+                guard let path = await speakText(text) else { return }
+                self.cache[text] = path
+                self.promptCloserText = text
+            }
         }
     }
 
@@ -168,13 +190,18 @@ class Narrator: NSObject, AVAudioPlayerDelegate {
 
         if pct < 0.2 && !spokeEarly { spokeEarly = true; speak(preEarly) }
         else if pct > 0.35 && pct < 0.65 && !spokeMid { spokeMid = true; speak(preMid) }
-        else if pct > 0.8 && !spokeLate { spokeLate = true; speak(preLate) }
+        else if pct > 0.7 && !spokeLate { spokeLate = true; speak(preLate) }
     }
 
     func onDone() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             guard let self else { return }
-            self.speak(self.preCloser)
+            // Prefer the prompt-aware closer ("Isn't that a nice bike?") if TTS came back in time.
+            if let text = self.promptCloserText, self.cache[text] != nil {
+                self.speak(text, queueIfBusy: true)
+            } else {
+                self.speak(self.preCloser, queueIfBusy: true)
+            }
         }
     }
 

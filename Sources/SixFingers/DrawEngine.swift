@@ -157,6 +157,17 @@ func drawPolylines(rect: DrawRect, binaryWidth: Int, binaryHeight: Int,
     let focusClickCount = 3
     let focusClickDelayUs: UInt32 = 40000 // 40ms between clicks
 
+    let performFocusClicks: (Double, Double) -> Void = { fx, fy in
+        MouseControl.moveTo(fx, fy)
+        usleep(focusClickDelayUs)
+        for _ in 0..<focusClickCount {
+            MouseControl.mouseDown()
+            usleep(focusClickDelayUs)
+            MouseControl.mouseUp()
+            usleep(focusClickDelayUs)
+        }
+    }
+
     let fitScale = min(Double(rect.width) / Double(max(1, binaryWidth-1)),
                        Double(rect.height) / Double(max(1, binaryHeight-1)))
     let fillScale = max(Double(rect.width) / Double(max(1, binaryWidth-1)),
@@ -176,14 +187,7 @@ func drawPolylines(rect: DrawRect, binaryWidth: Int, binaryHeight: Int,
     if let firstPath = polylines.first(where: { !$0.isEmpty }) {
         let fx = offsetX + Double(firstPath[0].0) * uniformScale
         let fy = offsetY + Double(firstPath[0].1) * uniformScale
-        MouseControl.moveTo(fx, fy)
-        usleep(focusClickDelayUs)
-        for _ in 0..<focusClickCount {
-            MouseControl.mouseDown()
-            usleep(focusClickDelayUs)
-            MouseControl.mouseUp()
-            usleep(focusClickDelayUs)
-        }
+        performFocusClicks(fx, fy)
     }
 
     for (idx, path) in polylines.enumerated() {
@@ -193,9 +197,16 @@ func drawPolylines(rect: DrawRect, binaryWidth: Int, binaryHeight: Int,
             if let handler = onPauseHandler {
                 let shouldResume = handler() // blocks until user decides
                 if !shouldResume { throw DrawCancelled() }
-                continue // resume drawing
+                // The pause dialog may have stolen focus from the target window —
+                // redo the click dance before continuing. Fall through to draw path[idx].
+                if let focusPath = polylines[idx...].first(where: { !$0.isEmpty }) {
+                    let fx = offsetX + Double(focusPath[0].0) * uniformScale
+                    let fy = offsetY + Double(focusPath[0].1) * uniformScale
+                    performFocusClicks(fx, fy)
+                }
+            } else {
+                throw DrawCancelled()
             }
-            throw DrawCancelled()
         }
         guard !path.isEmpty else { continue }
 
@@ -222,6 +233,9 @@ func drawPolylines(rect: DrawRect, binaryWidth: Int, binaryHeight: Int,
                     onProgress?("Resuming in 1s")
                     Thread.sleep(forTimeInterval: 1)
                     onProgress?("Drawing...")
+                    // Re-focus the target window at the resume point — same click dance
+                    // as the initial start, since the pause dialog may have stolen focus.
+                    performFocusClicks(prevX, prevY)
                     // Re-press mouse down to continue
                     MouseControl.moveTo(prevX, prevY)
                     usleep(15000)

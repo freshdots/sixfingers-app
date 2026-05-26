@@ -156,13 +156,34 @@ class PickerOverlayView: NSView {
             let size = label.size(withAttributes: attrs)
             label.draw(at: NSPoint(x: viewRect.midX - size.width/2, y: viewRect.maxY + 6), withAttributes: attrs)
         } else {
-            let text = "Drag to select area · Esc to cancel"
-            let attrs: [NSAttributedString.Key: Any] = [
-                .foregroundColor: NSColor.white.withAlphaComponent(0.7),
-                .font: NSFont.systemFont(ofSize: 16)
+            let shadow = NSShadow()
+            shadow.shadowColor = NSColor.black.withAlphaComponent(0.85)
+            shadow.shadowBlurRadius = 12
+            shadow.shadowOffset = NSSize(width: 0, height: -2)
+
+            let title = "Click and drag to choose where to draw"
+            let titleAttrs: [NSAttributedString.Key: Any] = [
+                .foregroundColor: NSColor.white,
+                .font: NSFont.systemFont(ofSize: 34, weight: .semibold),
+                .shadow: shadow
             ]
-            let size = text.size(withAttributes: attrs)
-            text.draw(at: NSPoint(x: bounds.midX - size.width/2, y: bounds.midY - size.height/2), withAttributes: attrs)
+            let titleSize = title.size(withAttributes: titleAttrs)
+
+            let hint = "Esc to cancel"
+            let hintAttrs: [NSAttributedString.Key: Any] = [
+                .foregroundColor: NSColor.white.withAlphaComponent(0.75),
+                .font: NSFont.systemFont(ofSize: 16, weight: .medium),
+                .shadow: shadow
+            ]
+            let hintSize = hint.size(withAttributes: hintAttrs)
+
+            let gap: CGFloat = 14
+            let totalH = titleSize.height + gap + hintSize.height
+            let titleY = bounds.midY - totalH/2 + hintSize.height + gap
+            let hintY = bounds.midY - totalH/2
+
+            title.draw(at: NSPoint(x: bounds.midX - titleSize.width/2, y: titleY), withAttributes: titleAttrs)
+            hint.draw(at: NSPoint(x: bounds.midX - hintSize.width/2, y: hintY), withAttributes: hintAttrs)
         }
     }
 }

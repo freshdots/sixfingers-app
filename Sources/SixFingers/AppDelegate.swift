@@ -913,7 +913,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         var s = SettingsManager.shared.load()
         s.narratorEnabled = !s.narratorEnabled
         SettingsManager.shared.save(s)
-        sender.state = s.narratorEnabled ? .on : .off
+        buildMenu()
     }
 
     @objc func onSettings() {
@@ -923,7 +923,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     @objc func onAbout() {
         let alert = NSAlert()
         alert.messageText = "SixFingers"
-        alert.informativeText = "Drawing on its own.\n\nMade by Dot Fun Labs\nVersion 1.1.0\n\nFeedback: x.com/taydotfun"
+        alert.informativeText = "Drawing on its own.\n\nMade by Dot Fun Labs\nVersion 1.1.1\n\nFeedback: x.com/taydotfun"
         alert.alertStyle = .informational
         if let icon = appIcon { alert.icon = icon }
         alert.addButton(withTitle: "OK")
