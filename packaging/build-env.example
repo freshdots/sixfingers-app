@@ -1,5 +1,9 @@
 ENABLE_CODESIGN=1
 CODESIGN_IDENTITY="Developer ID Application: Dot Fun Labs (TEAMID1234)"
+# Notarization (required so a downloaded DMG isn't rejected by Gatekeeper):
+#   xcrun notarytool store-credentials "<profile>" --apple-id you@example.com --team-id TEAMID1234 --password <app-specific-password>
+# ENABLE_NOTARIZE=1
+# NOTARY_PROFILE="<profile>"
 ENTITLEMENTS_PATH="<FULL_PATH>/sixfingers/packaging/sixfingers-entitlements.plist"
 DMG_NAME="SixFingers"
 DMG_VOLUME_NAME="SixFingers"

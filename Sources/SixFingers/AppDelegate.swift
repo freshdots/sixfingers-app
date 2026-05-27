@@ -707,6 +707,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         w.title = "SixFingers"
         w.level = .floating
         w.center()
+        // ARC owns this window via self.drawWindow. Leaving the AppKit default
+        // (release-on-close) would free it out from under that strong reference,
+        // double-releasing on reopen/teardown — EXC_BAD_ACCESS in objc_release.
+        w.isReleasedWhenClosed = false
         self.drawWindow = w
 
         let cv = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 220))
@@ -1103,7 +1107,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                     try? FileManager.default.removeItem(atPath: audioPath)
                     DispatchQueue.main.async { [weak self] in
                         self?.setTrayState(.idle)
-                        if !transcript.isEmpty { self?.showDrawWithText(transcript) }
+                        // Speaking a prompt is an explicit "draw this" — go straight to
+                        // generation instead of reopening the box to re-confirm typed text.
+                        if !transcript.isEmpty {
+                            self?.runDrawFlow(result: PromptResult(type: .text, value: transcript))
+                        }
                     }
                 } catch {
                     try? FileManager.default.removeItem(atPath: audioPath)
@@ -1191,11 +1199,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
 
         throw NSError(domain: "", code: 2, userInfo: [NSLocalizedDescriptionKey: "Transcription not supported for this provider"])
-    }
-
-    func showDrawWithText(_ text: String) {
-        guard !drawing else { return }
-        showDrawWindow(prefill: text)
     }
 
     // MARK: - Draw flows

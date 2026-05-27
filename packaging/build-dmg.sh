@@ -143,5 +143,27 @@ if [[ "${ENABLE_CODESIGN:-0}" == "1" ]]; then
   codesign --force --sign "$CODESIGN_IDENTITY" --timestamp "$FINAL_DMG_PATH"
 fi
 
+# Notarize + staple. Without this, a freshly downloaded (quarantined) DMG is rejected by
+# Gatekeeper with "not safe / move to Trash" even though it is Developer ID signed.
+# NOTARY_PROFILE is a keychain profile created once with:
+#   xcrun notarytool store-credentials "<profile>" --apple-id you@example.com \
+#     --team-id P4HYHYKX7H --password <app-specific-password>
+if [[ "${ENABLE_NOTARIZE:-0}" == "1" ]]; then
+  if [[ "${ENABLE_CODESIGN:-0}" != "1" ]]; then
+    echo "ENABLE_NOTARIZE=1 requires ENABLE_CODESIGN=1 (notarization needs a Developer ID signature)." >&2
+    exit 1
+  fi
+  if [[ -z "${NOTARY_PROFILE:-}" ]]; then
+    echo "ENABLE_NOTARIZE=1 requires NOTARY_PROFILE (a notarytool keychain profile name)." >&2
+    exit 1
+  fi
+  echo "Submitting DMG to Apple notary service (this can take a few minutes)..."
+  xcrun notarytool submit "$FINAL_DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
+  echo "Stapling notarization ticket to DMG..."
+  xcrun stapler staple "$FINAL_DMG_PATH"
+  echo "Verifying Gatekeeper acceptance..."
+  spctl -a -vvv -t install "$FINAL_DMG_PATH"
+fi
+
 echo "Built DMG:"
 echo "  $FINAL_DMG_PATH"

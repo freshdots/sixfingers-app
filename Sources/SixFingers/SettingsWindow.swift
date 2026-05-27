@@ -36,6 +36,7 @@ class SettingsWindowController: NSObject, NSWindowDelegate {
         w.center()
         w.delegate = self
         w.title = "Settings"
+        w.isReleasedWhenClosed = false  // ARC owns it via self.window; don't double-free on close
         self.window = w
 
         let cv = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: windowH))
