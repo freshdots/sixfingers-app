@@ -23,7 +23,7 @@ class SettingsWindowController: NSObject, NSWindowDelegate {
             self.selectedProvider = s.provider
         } else {
             // Check if any provider has a key
-            let hasAnyKey = ["fal.ai", "openai", "gemini"].contains { SettingsManager.shared.getApiKey($0) != nil }
+            let hasAnyKey = ["fal.ai", "openai"].contains { SettingsManager.shared.getApiKey($0) != nil }
             self.selectedProvider = hasAnyKey ? s.provider : "free"
         }
 
@@ -99,9 +99,9 @@ class SettingsWindowController: NSObject, NSWindowDelegate {
         cv.addSubview(provLabel)
         y -= 28
 
-        let provSeg = NSSegmentedControl(labels: ["None", "fal.ai", "OpenAI", "Gemini"], trackingMode: .selectOne, target: self, action: #selector(onProviderChange(_:)))
+        let provSeg = NSSegmentedControl(labels: ["None", "fal.ai", "OpenAI"], trackingMode: .selectOne, target: self, action: #selector(onProviderChange(_:)))
         provSeg.frame = NSRect(x: 24, y: y, width: 372, height: 24)
-        let provIds = ["free", "fal.ai", "openai", "gemini"]
+        let provIds = ["free", "fal.ai", "openai"]
         provSeg.selectedSegment = provIds.firstIndex(of: selectedProvider) ?? 0
         cv.addSubview(provSeg)
         self.providerSegment = provSeg
@@ -229,7 +229,7 @@ class SettingsWindowController: NSObject, NSWindowDelegate {
             SettingsManager.shared.setApiKey(selectedProvider, key: currentKey)
         }
 
-        let provIds = ["free", "fal.ai", "openai", "gemini"]
+        let provIds = ["free", "fal.ai", "openai"]
         selectedProvider = provIds[sender.selectedSegment]
         let isFree = selectedProvider == "free"
 

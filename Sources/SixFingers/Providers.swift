@@ -33,8 +33,6 @@ func generateImage(prompt: String, style: String, aspect: Double? = nil) async t
         return try await falGenerate(prompt: fullPrompt, rawPrompt: prompt, shape: shape, key: key)
     case "openai":
         return try await openaiGenerate(prompt: fullPrompt, rawPrompt: prompt, shape: shape, key: key)
-    case "gemini":
-        return try await geminiGenerate(prompt: fullPrompt, rawPrompt: prompt, key: key)
     default:
         throw NSError(domain: "", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown provider"])
     }
@@ -88,35 +86,6 @@ private func openaiGenerate(prompt: String, rawPrompt: String, shape: String, ke
     throw NSError(domain: "", code: 3, userInfo: [NSLocalizedDescriptionKey: "No image returned"])
 }
 
-private func geminiGenerate(prompt: String, rawPrompt: String, key: String) async throws -> String {
-    let body: [String: Any] = [
-        "contents": [["parts": [["text": prompt]]]],
-        "generationConfig": ["responseModalities": ["IMAGE"]]
-    ]
-    let data = try JSONSerialization.data(withJSONObject: body)
-
-    var req = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=\(key)")!)
-    req.httpMethod = "POST"
-    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    req.httpBody = data
-
-    let (resData, _) = try await URLSession.shared.data(for: req)
-    let json = try JSONSerialization.jsonObject(with: resData) as? [String: Any]
-
-    if let candidates = json?["candidates"] as? [[String: Any]],
-       let content = candidates.first?["content"] as? [String: Any],
-       let parts = content["parts"] as? [[String: Any]] {
-        for part in parts {
-            if let inlineData = part["inlineData"] as? [String: Any],
-               let b64 = inlineData["data"] as? String,
-               let imgData = Data(base64Encoded: b64) {
-                return saveGeneratedImage(imgData, prefix: "", prompt: rawPrompt)
-            }
-        }
-    }
-    throw NSError(domain: "", code: 3, userInfo: [NSLocalizedDescriptionKey: "No image returned"])
-}
-
 // MARK: - Closer line generation
 
 /// Asks the configured LLM to write a single short, natural closer line that
@@ -139,8 +108,6 @@ func generateCloserText(prompt: String) async -> String? {
     switch s.provider {
     case "openai":
         return try? await openaiCloser(system: system, user: user, key: key)
-    case "gemini":
-        return try? await geminiCloser(system: system, user: user, key: key)
     default:
         return nil
     }
@@ -168,26 +135,6 @@ private func openaiCloser(system: String, user: String, key: String) async throw
     let choices = json?["choices"] as? [[String: Any]]
     let msg = choices?.first?["message"] as? [String: Any]
     let text = msg?["content"] as? String
-    return text.map(cleanCloser)
-}
-
-private func geminiCloser(system: String, user: String, key: String) async throws -> String? {
-    let body: [String: Any] = [
-        "contents": [["parts": [["text": "\(system)\n\n\(user)"]]]],
-        "generationConfig": ["temperature": 0.9, "maxOutputTokens": 40],
-    ]
-    let data = try JSONSerialization.data(withJSONObject: body)
-    var req = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=\(key)")!)
-    req.httpMethod = "POST"
-    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    req.httpBody = data
-
-    let (resData, _) = try await URLSession.shared.data(for: req)
-    let json = try JSONSerialization.jsonObject(with: resData) as? [String: Any]
-    let candidates = json?["candidates"] as? [[String: Any]]
-    let content = candidates?.first?["content"] as? [String: Any]
-    let parts = content?["parts"] as? [[String: Any]]
-    let text = parts?.first?["text"] as? String
     return text.map(cleanCloser)
 }
 

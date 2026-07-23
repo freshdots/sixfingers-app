@@ -10,7 +10,6 @@ struct ProviderInfo {
 let providers: [String: ProviderInfo] = [
     "fal.ai": ProviderInfo(label: "fal.ai", envKey: "FAL_KEY", keyUrl: "fal.ai/dashboard/keys"),
     "openai": ProviderInfo(label: "OpenAI", envKey: "OPENAI_API_KEY", keyUrl: "platform.openai.com/api-keys"),
-    "gemini": ProviderInfo(label: "Gemini", envKey: "GEMINI_API_KEY", keyUrl: "aistudio.google.com/apikey"),
 ]
 
 let builtInStyles: [(String, String)] = [
@@ -91,6 +90,10 @@ class SettingsManager {
         }
         if styles[settings.style] == nil && settings.customStyles[settings.style] == nil {
             settings.style = "Dürer"
+        }
+        // Gemini support removed — direct users of a retired provider to fal.ai
+        if settings.provider == "gemini" {
+            settings.provider = "fal.ai"
         }
         return settings
     }
